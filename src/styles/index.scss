@@ -1,0 +1,43 @@
+@use './variables.scss' as *;
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html, body {
+  width: 100%;
+  height: 100%;
+  font-family: -apple-system, BlinkMacSystemFont, 'Helvetica Neue', Helvetica, Segoe UI, Arial, Roboto, 'PingFang SC', 'miui', 'Hiragino Sans GB', 'Microsoft Yahei', sans-serif;
+  font-size: $font-size-md;
+  color: $color-text-primary;
+  background-color: $color-background;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+// Vant样式覆盖
+:root {
+  --van-primary-color: #{$color-primary};
+  --van-button-primary-background-color: #{$color-primary};
+  --van-button-primary-border-color: #{$color-primary};
+  --van-nav-bar-background-color: #{$color-primary};
+  --van-nav-bar-title-text-color: #{$color-text-primary};
+  --van-nav-bar-icon-color: #{$color-text-primary};
+}
+
+// 通用类
+.page-container {
+  min-height: 100vh;
+  background-color: $color-background;
+  padding-bottom: 50px;
+}
+
+.card {
+  background: $color-white;
+  border-radius: $radius-md;
+  padding: $spacing-lg;
+  margin: $spacing-md;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+}
