@@ -107,11 +107,16 @@
           <van-icon name="location-o" />
           <span v-if="hasLocation && distanceText !== '计算中...'">{{ distanceText }}</span>
           <span v-else-if="hasLocation">正在规划路线...</span>
-          <span v-else style="color: #FF9800;">定位中，获取位置后显示路线...</span>
+          <span v-else style="color: #FF9800;">正在获取位置...</span>
         </div>
         <van-button size="small" type="primary" @click="openNavigation">
           打开导航
         </van-button>
+      </div>
+      <!-- ETA 展示 -->
+      <div class="eta-info" v-if="etaText">
+        <van-icon name="clock-o" />
+        <span>{{ etaText }}</span>
       </div>
     </div>
 
@@ -134,10 +139,12 @@
 import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue'
 import { useRoute } from 'vue-router'
 import { showDialog, showToast } from 'vant'
-import { getOrderDetail, acceptOrder, rejectOrder, startDelivery, completeOrder } from '@/api/delivery'
+import { getOrderDetail, acceptOrder, rejectOrder, startDelivery, completeOrder, getCurrentLocation } from '@/api/delivery'
 import { useLocation } from '@/composables/useLocation'
+import { useUserStore } from '@/stores/user'
 
 const route = useRoute()
+const userStore = useUserStore()
 const order = ref(null)
 
 // 使用位置管理 composable
@@ -148,13 +155,23 @@ const distanceText = ref('计算中...')
 let mapInstance = null
 let routePolyline = null
 
-// 交通工具选项
+// 交通工具选项（只保留汽车和步行）
 const transportOptions = [
-  { value: 'riding', label: '电动车', icon: 'bike' },
   { value: 'driving', label: '汽车', icon: 'car' },
   { value: 'walking', label: '步行', icon: 'aim' }
 ]
-const transportMode = ref('riding')
+// 根据配送员车辆类型确定默认交通工具
+const getDefaultTransport = () => {
+  const vt = userStore.vehicleType
+  if (vt === '汽车') return 'driving'
+  // 摩托车、电动车都走汽车路线（因为已删除电动车选项）
+  if (vt === '摩托车' || vt === '电动车') return 'driving'
+  return 'driving' // 默认汽车
+}
+const transportMode = ref(getDefaultTransport())
+
+// ETA 预计送达时间
+const etaText = ref('')
 
 // 计算属性
 const hasDestination = computed(() => {
@@ -183,7 +200,7 @@ const loadDetail = async () => {
     const res = await getOrderDetail(route.params.id)
     order.value = res.data
     
-    // 有目的地坐标就初始化地图
+    // 有目的地坐标就初始化地图（不等定位）
     if (hasDestination.value) {
       nextTick(() => initMap())
     }
@@ -192,12 +209,69 @@ const loadDetail = async () => {
     if ([2, 6].includes(order.value.status)) {
       startReport(order.value.id)
     }
+    
+    // 异步获取位置并绘制路线（不阻塞地图显示）
+    initLocationAndDrawRoute()
   } catch (error) {
     console.error('加载订单详情失败:', error)
   }
 }
 
-// 初始化地图
+/**
+ * 异步获取位置并绘制路线
+ * 优先级：1. 浏览器GPS → 2. 高德IP定位 → 3. 后端最后已知位置 → 4. Store缓存
+ */
+const initLocationAndDrawRoute = async () => {
+  if (!hasDestination.value) return
+  const destLng = order.value.destinationLng
+  const destLat = order.value.destinationLat
+  
+  // 1. 尝试浏览器/高德定位
+  const success = await fetchLocation()
+  if (success) {
+    const { lng, lat } = getLocation()
+    if (lng && lat) {
+      console.log('[OrderDetail] 定位成功，绘制路线:', lng, lat)
+      drawRoute(lng, lat, destLng, destLat)
+      return
+    }
+  }
+  
+  console.warn('[OrderDetail] 浏览器定位失败，尝试后端位置')
+  
+  // 2. 从后端获取最后已知位置
+  try {
+    const res = await getCurrentLocation(order.value.id)
+    if (res.data && res.data.longitude && res.data.latitude) {
+      const lng = Number(res.data.longitude)
+      const lat = Number(res.data.latitude)
+      console.log('[OrderDetail] 使用后端位置:', lng, lat)
+      // 同步到 composable 和 store
+      hasLocation.value = true
+      currentLng.value = lng
+      currentLat.value = lat
+      userStore.setCurrentLocation(lng, lat)
+      drawRoute(lng, lat, destLng, destLat)
+      return
+    }
+  } catch (err) {
+    console.warn('[OrderDetail] 获取后端位置失败:', err)
+  }
+  
+  // 3. 最后尝试 store 缓存
+  if (userStore.currentLng && userStore.currentLat) {
+    console.log('[OrderDetail] 使用缓存位置')
+    drawRoute(userStore.currentLng, userStore.currentLat, destLng, destLat)
+    hasLocation.value = true
+    return
+  }
+  
+  // 4. 完全没有位置
+  console.warn('[OrderDetail] 所有定位方式均失败')
+  distanceText.value = '无法获取位置，请检查定位权限'
+}
+
+// 初始化地图（以目的地为中心，不等定位）
 const initMap = () => {
   const container = document.getElementById('deliveryMap')
   if (!container) return
@@ -208,16 +282,10 @@ const initMap = () => {
   const destLng = order.value.destinationLng
   const destLat = order.value.destinationLat
 
-  // 确定地图中心点
-  let center = [destLng, destLat]
-  const { lng: myLng, lat: myLat } = getLocation()
-  if (myLng && myLat) {
-    center = [(myLng + destLng) / 2, (myLat + destLat) / 2]
-  }
-
+  // 始终以目的地为中心初始化地图
   mapInstance = new AMap.Map('deliveryMap', {
     zoom: 13,
-    center: center
+    center: [destLng, destLat]
   })
 
   // 目的地标记
@@ -227,11 +295,8 @@ const initMap = () => {
     title: '配送地址',
     label: { content: '配送地址', direction: 'top' }
   })
-
-  // 如果有位置，显示路线
-  if (myLng && myLat) {
-    drawRoute(myLng, myLat, destLng, destLat)
-  }
+  
+  // 路线绘制由 initLocationAndDrawRoute 异步处理
 }
 
 // 绘制路线（使用高德路线规划）
@@ -244,15 +309,19 @@ const drawRoute = (fromLng, fromLat, toLng, toLat) => {
     routePolyline = null
   }
 
-  // 配送员标记
+  // 配送员标记 - 使用自定义图标
+  const deliveryIconDataUri = "data:image/svg+xml," + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 40"><ellipse cx="16" cy="38" rx="6" ry="2" fill="rgba(0,0,0,0.15)"/><path d="M16 0C10 0 5 5 5 10C5 15 16 28 16 28C16 28 27 15 27 10C27 5 22 0 16 0Z" fill="#1890FF"/><circle cx="16" cy="10" r="4" fill="white"/><path d="M13 9 L19 9 L16 13Z" fill="#1890FF" stroke="white" stroke-width="0.5"/></svg>')
+  const deliveryIcon = new AMap.Icon({
+    size: new AMap.Size(32, 40),
+    image: deliveryIconDataUri,
+    imageSize: new AMap.Size(32, 40)
+  })
   new AMap.Marker({
     map: mapInstance,
     position: [fromLng, fromLat],
     title: '我的位置',
-    icon: new AMap.Icon({
-      size: new AMap.Size(25, 34),
-      image: '//a.amap.com/jsapi_demos/static/demo-center/icons/poi-marker-red.png'
-    })
+    icon: deliveryIcon,
+    offset: new AMap.Pixel(-16, -40)
   })
 
   // 根据交通工具选择路线规划方式
@@ -262,16 +331,28 @@ const drawRoute = (fromLng, fromLat, toLng, toLat) => {
   let routePlugin = null
   if (transportMode.value === 'driving') {
     routePlugin = new AMap.Driving({ map: null })
-  } else if (transportMode.value === 'walking') {
-    routePlugin = new AMap.Walking({ map: null })
   } else {
-    routePlugin = new AMap.Riding({ map: null })
+    // walking
+    routePlugin = new AMap.Walking({ map: null })
   }
 
   routePlugin.search(origin, destination, (status, result) => {
+    console.log('[OrderDetail] 路线规划结果:', status, result)
     if (status === 'complete') {
-      // AMap.Driving 使用 result.routes，AMap.Riding/Walking 使用 result.data
-      const routeData = result.routes?.[0] || result.data?.[0]
+      // 兼容多种返回结构
+      // AMap 2.0: result.routes[0] 包含 steps/rides
+      // 某些版本: result.data[0] 或 result.routes[0].routes[0]
+      let routeData = result.routes?.[0]
+      // 如果 routes[0] 内部还有 routes 数组（嵌套结构）
+      if (routeData?.routes && Array.isArray(routeData.routes)) {
+        routeData = routeData.routes[0]
+      }
+      // 回退到 data 数组
+      if (!routeData) {
+        routeData = result.data?.[0]
+      }
+      console.log('[OrderDetail] 路线数据:', routeData)
+      
       if (!routeData) {
         console.warn('路线规划无数据，使用直线')
         drawStraightLine(fromLng, fromLat, toLng, toLat)
@@ -279,16 +360,26 @@ const drawRoute = (fromLng, fromLat, toLng, toLat) => {
       }
       
       const path = []
-
-      // 解析路线坐标
-      if (routeData.steps) {
-        routeData.steps.forEach(step => {
-          if (step.path) {
-            step.path.forEach(p => {
+      // Driving/Walking 都使用 steps[].path[]
+      const segments = routeData.steps
+      console.log('[OrderDetail] 路段数量:', segments?.length)
+      if (segments) {
+        segments.forEach((seg) => {
+          // step.path 是完整坐标数组，全部添加
+          if (seg.path) {
+            seg.path.forEach(p => {
               path.push([p.lng, p.lat])
             })
           }
         })
+      }
+      console.log('[OrderDetail] 路径坐标数:', path.length)
+      // 起终点确保在路径中
+      if (path.length === 0 || path[0][0] !== fromLng) {
+        path.unshift([fromLng, fromLat])
+      }
+      if (path.length === 0 || path[path.length - 1][0] !== toLng) {
+        path.push([toLng, toLat])
       }
 
       if (path.length > 0) {
@@ -304,12 +395,17 @@ const drawRoute = (fromLng, fromLat, toLng, toLat) => {
         })
       }
 
-      // 显示距离和时间
+      // 显示距离、时间和 ETA
       const distance = routeData.distance
       const time = routeData.time
       let distText = distance > 1000 ? (distance / 1000).toFixed(1) + '公里' : Math.round(distance) + '米'
       let timeText = time > 3600 ? (time / 3600).toFixed(1) + '小时' : Math.round(time / 60) + '分钟'
       distanceText.value = distText + ' · 约' + timeText
+      
+      // 计算 ETA
+      const now = new Date()
+      const etaTime = new Date(now.getTime() + time * 1000)
+      etaText.value = '预计 ' + etaTime.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }) + ' 送达'
 
       mapInstance.setFitView(null, false, [60, 60, 60, 60])
     } else {
@@ -454,9 +550,8 @@ const getStatusTag = (status) => {
   return map[status] || 'default'
 }
 
-onMounted(async () => {
-  // 先获取配送员当前位置，再加载订单和地图
-  await fetchLocation()
+onMounted(() => {
+  // 直接加载订单和地图，不等定位
   loadDetail()
 })
 
@@ -578,5 +673,15 @@ onUnmounted(() => {
     color: #333333;
     font-weight: 500;
   }
+}
+
+.eta-info {
+  margin-top: 8px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 14px;
+  color: #1890FF;
+  font-weight: 500;
 }
 </style>

@@ -1,6 +1,6 @@
 import { ref } from 'vue'
 import { useUserStore } from '@/stores/user'
-import { reportLocation as reportLocationApi } from '@/api/delivery'
+import { reportLocation as reportLocationApi, reportLocationBatch as reportLocationBatchApi, getActiveDispatchIds as getActiveDispatchIdsApi } from '@/api/delivery'
 
 /**
  * 配送员位置管理 composable
@@ -22,6 +22,9 @@ export function useLocation() {
   // 位置上报定时器
   let reportTimer = null
   let currentDispatchId = null
+  // 全局位置上报定时器
+  let globalReportTimer = null
+  let activeDispatchIds = []
 
   /**
    * 获取当前位置（GPS + 高德IP定位备选）
@@ -121,6 +124,7 @@ export function useLocation() {
 
   /**
    * 执行位置上报（内部方法）
+   * 优先级：GPS → 高德IP定位 → 缓存位置
    */
   const _doReport = () => {
     if (!currentDispatchId) return
@@ -135,21 +139,62 @@ export function useLocation() {
           _sendReport(currentDispatchId, lng, lat)
         },
         (err) => {
-          console.warn('[useLocation] GPS获取失败，使用缓存位置上报:', err.message)
-          // GPS失败时使用缓存位置上报
-          if (currentLng.value && currentLat.value) {
-            _sendReport(currentDispatchId, currentLng.value, currentLat.value)
-          }
+          console.warn('[useLocation] 上报时GPS获取失败:', err.message)
+          // GPS失败，尝试高德IP定位
+          _amapGeolocationForReport()
         },
         { enableHighAccuracy: true, timeout: 5000 }
       )
-    } else if (currentLng.value && currentLat.value) {
-      _sendReport(currentDispatchId, currentLng.value, currentLat.value)
+    } else {
+      // 无GPS能力，尝试高德IP定位
+      _amapGeolocationForReport()
     }
   }
 
   /**
-   * 发送位置上报请求
+   * 上报时的高德定位回退（内部方法）
+   * 先尝试高德IP定位，失败则用缓存位置
+   */
+  const _amapGeolocationForReport = () => {
+    if (typeof AMap === 'undefined') {
+      // 高德API未加载，用缓存位置
+      _reportWithCachedLocation()
+      return
+    }
+    AMap.plugin('AMap.Geolocation', () => {
+      const geolocation = new AMap.Geolocation({
+        enableHighAccuracy: true,
+        timeout: 8000
+      })
+      geolocation.getCurrentPosition((status, result) => {
+        if (status === 'complete' && result.position) {
+          const lng = result.position.lng
+          const lat = result.position.lat
+          _setLocation(lng, lat)
+          _sendReport(currentDispatchId, lng, lat)
+          console.log('[useLocation] 上报时使用高德IP定位成功:', lng, lat)
+        } else {
+          console.warn('[useLocation] 上报时高德定位也失败，使用缓存')
+          _reportWithCachedLocation()
+        }
+      })
+    })
+  }
+
+  /**
+   * 使用缓存位置上报（最后手段）
+   */
+  const _reportWithCachedLocation = () => {
+    if (currentLng.value && currentLat.value) {
+      _sendReport(currentDispatchId, currentLng.value, currentLat.value)
+      console.log('[useLocation] 使用缓存位置上报:', currentLng.value, currentLat.value)
+    } else {
+      console.warn('[useLocation] 无可用位置，本次上报跳过')
+    }
+  }
+
+  /**
+   * 发送单条位置上报请求（用于单个派单的场景）
    */
   const _sendReport = (dispatchId, lng, lat) => {
     reportLocationApi({
@@ -159,6 +204,156 @@ export function useLocation() {
     }).catch(err => {
       console.error('[useLocation] 位置上报失败:', err)
     })
+  }
+
+  /**
+   * 启动全局位置上报（上线即上报模式，参考美团骑手设计）
+   * 自动获取所有在途派单ID，定时上报位置到每个在途派单
+   */
+  const startGlobalReport = async () => {
+    if (globalReportTimer) {
+      console.warn('[useLocation] 全局位置上报已在运行')
+      return
+    }
+    console.log('[useLocation] 启动全局位置上报')
+
+    // 获取在途派单ID列表
+    try {
+      const res = await getActiveDispatchIdsApi()
+      activeDispatchIds = res.data || []
+      console.log('[useLocation] 当前在途派单:', activeDispatchIds)
+
+      if (activeDispatchIds.length === 0) {
+        console.log('[useLocation] 无在途派单，无需全局上报')
+        return
+      }
+    } catch (error) {
+      console.error('[useLocation] 获取在途派单ID失败:', error)
+      return
+    }
+
+    // 立即上报一次
+    _doGlobalReport()
+
+    // 每30秒上报
+    globalReportTimer = setInterval(_doGlobalReport, 30000)
+
+    // 每5分钟刷新在途派单列表（可能接新单或完成旧单）
+    setInterval(_refreshActiveDispatchIds, 300000)
+  }
+
+  /**
+   * 停止全局位置上报
+   */
+  const stopGlobalReport = () => {
+    if (globalReportTimer) {
+      clearInterval(globalReportTimer)
+      globalReportTimer = null
+    }
+    activeDispatchIds = []
+    console.log('[useLocation] 停止全局位置上报')
+  }
+
+  /**
+   * 执行全局位置上报
+   * 优先级：GPS → 高德IP定位 → 缓存位置
+   */
+  const _doGlobalReport = () => {
+    if (activeDispatchIds.length === 0) {
+      // 刷新派单列表
+      _refreshActiveDispatchIds()
+      return
+    }
+
+    if (navigator.geolocation) {
+      navigator.geolocation.getCurrentPosition(
+        (pos) => {
+          const lng = pos.coords.longitude
+          const lat = pos.coords.latitude
+          _setLocation(lng, lat)
+          _sendGlobalReport(lng, lat)
+        },
+        () => {
+          console.warn('[useLocation] 全局上报时GPS失败，尝试高德IP')
+          _amapGeolocationForGlobalReport()
+        },
+        { enableHighAccuracy: true, timeout: 5000 }
+      )
+    } else {
+      _amapGeolocationForGlobalReport()
+    }
+  }
+
+  /**
+   * 全局上报时的高德定位回退
+   */
+  const _amapGeolocationForGlobalReport = () => {
+    if (typeof AMap === 'undefined') {
+      _globalReportWithCachedLocation()
+      return
+    }
+    AMap.plugin('AMap.Geolocation', () => {
+      const geolocation = new AMap.Geolocation({
+        enableHighAccuracy: true,
+        timeout: 8000
+      })
+      geolocation.getCurrentPosition((status, result) => {
+        if (status === 'complete' && result.position) {
+          const lng = result.position.lng
+          const lat = result.position.lat
+          _setLocation(lng, lat)
+          _sendGlobalReport(lng, lat)
+          console.log('[useLocation] 全局上报使用高德IP定位成功:', lng, lat)
+        } else {
+          console.warn('[useLocation] 全局上报时高德定位也失败，使用缓存')
+          _globalReportWithCachedLocation()
+        }
+      })
+    })
+  }
+
+  /**
+   * 使用缓存位置进行全局上报
+   */
+  const _globalReportWithCachedLocation = () => {
+    if (currentLng.value && currentLat.value) {
+      _sendGlobalReport(currentLng.value, currentLat.value)
+      console.log('[useLocation] 使用缓存位置全局上报:', currentLng.value, currentLat.value)
+    } else {
+      console.warn('[useLocation] 无可用位置，本次全局上报跳过')
+    }
+  }
+
+  /**
+   * 发送全局位置上报请求（批量）
+   */
+  const _sendGlobalReport = (lng, lat) => {
+    if (activeDispatchIds.length === 0) return
+    reportLocationBatchApi({
+      dispatchIds: activeDispatchIds,
+      longitude: lng,
+      latitude: lat
+    }).catch(err => {
+      console.error('[useLocation] 全局位置上报失败:', err)
+    })
+  }
+
+  /**
+   * 刷新在途派单ID列表
+   */
+  const _refreshActiveDispatchIds = async () => {
+    try {
+      const res = await getActiveDispatchIdsApi()
+      activeDispatchIds = res.data || []
+      console.log('[useLocation] 刷新在途派单:', activeDispatchIds)
+
+      // 如果没有在途派单了，停止全局上报
+      if (activeDispatchIds.length === 0 && globalReportTimer) {
+        stopGlobalReport()
+      }
+    } catch (error) {
+      console.error('[useLocation] 刷新在途派单ID失败:', error)
+    }
   }
 
   /**
@@ -181,6 +376,8 @@ export function useLocation() {
     fetchLocation,
     startReport,
     stopReport,
+    startGlobalReport,
+    stopGlobalReport,
     getLocation
   }
 }

@@ -95,7 +95,7 @@ import { useLocation } from '@/composables/useLocation'
 
 const router = useRouter()
 const userStore = useUserStore()
-const { fetchLocation } = useLocation()
+const { fetchLocation, startGlobalReport, stopGlobalReport } = useLocation()
 const isOnline = ref(userStore.userInfo.onlineStatus === 1)
 const stats = ref({})
 const orders = ref([])
@@ -125,6 +125,12 @@ const onStatusChange = async (value) => {
     const info = { ...userStore.userInfo, onlineStatus: value ? 1 : 0 }
     userStore.setUserInfo(info)
     showToast(value ? '已上线，开始接单' : '已离线')
+    // 上线时启动全局位置上报，离线时停止
+    if (value) {
+      startGlobalReport()
+    } else {
+      stopGlobalReport()
+    }
   } catch (error) {
     console.error('切换在线状态失败:', error)
     isOnline.value = !value // 回滚状态
@@ -175,10 +181,14 @@ const goToDetail = (id) => {
   router.push(`/orders/${id}`)
 }
 
-onMounted(() => {
-  loadData()
+onMounted(async () => {
+  await loadData()
   // 获取配送员当前位置
-  fetchLocation()
+  await fetchLocation()
+  // 如果已在线，启动全局位置上报
+  if (isOnline.value) {
+    startGlobalReport()
+  }
 })
 </script>
 
