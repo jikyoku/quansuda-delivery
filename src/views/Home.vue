@@ -23,7 +23,7 @@
           <div class="stats-label">已完成</div>
         </div>
         <div class="stats-item">
-          <div class="stats-value">{{ stats.deliveringCount || 0 }}</div>
+          <div class="stats-value">{{ (stats.deliveringCount || 0) + acceptedOrders.length }}</div>
           <div class="stats-label">配送中</div>
         </div>
         <div class="stats-item">
@@ -82,6 +82,47 @@
         </div>
       </div>
     </div>
+    
+    <!-- 已接单列表（需要点击"开始配送"） -->
+    <div class="accepted-section" v-if="acceptedOrders.length > 0">
+      <div class="section-header">
+        <span class="section-title">已接单</span>
+        <van-tag type="warning" round>{{ acceptedOrders.length }}</van-tag>
+      </div>
+      
+      <div class="order-list">
+        <div
+          v-for="order in acceptedOrders"
+          :key="order.id"
+          class="order-card"
+          @click="goToDetail(order.id)"
+        >
+          <div class="order-header">
+            <span class="order-no">{{ order.dispatchNo }}</span>
+            <van-tag type="warning" size="medium">已接单</van-tag>
+          </div>
+          <div class="order-body">
+            <div class="order-info">
+              <div class="info-row">
+                <span class="label">商品：</span>
+                <span class="value">{{ order.productName }} × {{ order.quantity }}</span>
+              </div>
+              <div class="info-row">
+                <span class="label">结算：</span>
+                <span class="value price">¥{{ order.settlementAmount?.toFixed(2) }}</span>
+              </div>
+              <div class="info-row">
+                <span class="label">地址：</span>
+                <span class="value">{{ order.deliveryAddress }}</span>
+              </div>
+            </div>
+          </div>
+          <div class="order-actions">
+            <van-button size="small" type="success" @click.stop="handleStartDelivery(order)">开始配送</van-button>
+          </div>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -89,7 +130,7 @@
 import { ref, onMounted, computed } from 'vue'
 import { useRouter } from 'vue-router'
 import { showDialog, showToast } from 'vant'
-import { getTodayStats, getOrderList, acceptOrder, rejectOrder, updateOnlineStatus } from '@/api/delivery'
+import { getTodayStats, getOrderList, acceptOrder, rejectOrder, startDelivery, updateOnlineStatus } from '@/api/delivery'
 import { useUserStore } from '@/stores/user'
 import { useLocation } from '@/composables/useLocation'
 
@@ -104,12 +145,17 @@ const pendingOrders = computed(() => {
   return orders.value.filter(order => order.status === 6)
 })
 
+// 已接单订单（需要点击"开始配送"）
+const acceptedOrders = computed(() => {
+  return orders.value.filter(order => order.status === 1)
+})
+
 // 加载数据
 const loadData = async () => {
   try {
     const [statsRes, ordersRes] = await Promise.all([
       getTodayStats(),
-      getOrderList({ status: 6 })
+      getOrderList({ status: null }) // 加载全部状态，前端过滤
     ])
     stats.value = statsRes.data
     orders.value = ordersRes.data
@@ -157,21 +203,35 @@ const handleAccept = async (order) => {
 // 拒单
 const handleReject = async (order) => {
   try {
-    const result = await showDialog({
-      title: '拒单原因',
-      message: '请输入拒单原因',
-      showCancelButton: true,
-      showConfirmButton: false,
-      beforeClose: (action) => {
-        if (action === 'confirm') {
-          return false
-        }
-        return true
-      }
+    await showDialog({
+      title: '确认拒单',
+      message: '确定要拒绝此订单吗？',
+      showCancelButton: true
     })
+    await rejectOrder(order.id, { reason: '配送员拒单' })
+    showToast('已拒单')
+    loadData()
   } catch (error) {
     if (error !== 'cancel') {
       console.error('拒单失败:', error)
+    }
+  }
+}
+
+// 开始配送
+const handleStartDelivery = async (order) => {
+  try {
+    await showDialog({
+      title: '开始配送',
+      message: `确定开始配送订单 ${order.dispatchNo} 吗？`,
+      showCancelButton: true
+    })
+    await startDelivery(order.id)
+    showToast('已开始配送')
+    loadData()
+  } catch (error) {
+    if (error !== 'cancel') {
+      console.error('开始配送失败:', error)
     }
   }
 }
@@ -333,6 +393,80 @@ onMounted(async () => {
     background: #FFFFFF;
     border-radius: 8px;
     padding: 40px 0;
+  }
+}
+
+.accepted-section {
+  margin-top: 16px;
+  
+  .section-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 12px;
+    
+    .section-title {
+      font-size: 16px;
+      font-weight: 600;
+      color: #333333;
+    }
+  }
+  
+  .order-list {
+    .order-card {
+      background: #FFFFFF;
+      border-radius: 8px;
+      padding: 12px;
+      margin-bottom: 12px;
+      
+      .order-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 12px;
+        padding-bottom: 12px;
+        border-bottom: 1px solid #F5F5F5;
+        
+        .order-no {
+          font-size: 14px;
+          font-weight: 600;
+          color: #333333;
+        }
+      }
+      
+      .order-body {
+        margin-bottom: 12px;
+        
+        .order-info {
+          .info-row {
+            display: flex;
+            margin-bottom: 8px;
+            font-size: 14px;
+            
+            .label {
+              color: #999999;
+              min-width: 50px;
+            }
+            
+            .value {
+              color: #333333;
+              flex: 1;
+              
+              &.price {
+                color: #FF6B6B;
+                font-weight: 600;
+              }
+            }
+          }
+        }
+      }
+      
+      .order-actions {
+        display: flex;
+        justify-content: flex-end;
+        gap: 8px;
+      }
+    }
   }
 }
 </style>

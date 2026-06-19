@@ -3,6 +3,7 @@
     <van-tabs v-model:active="activeTab" @change="onTabChange" sticky>
       <van-tab title="全部" name="all" />
       <van-tab title="待接单" name="pending" />
+      <van-tab title="已接单" name="accepted" />
       <van-tab title="配送中" name="delivering" />
       <van-tab title="已完成" name="completed" />
     </van-tabs>
@@ -98,6 +99,9 @@
               <van-button size="small" @click.stop="handleReject(order)">拒单</van-button>
               <van-button size="small" type="primary" @click.stop="handleAccept(order)">接单</van-button>
             </div>
+            <div class="action-btns" v-else-if="order.status === 1">
+              <van-button size="small" type="success" @click.stop="handleStartDelivery(order)">开始配送</van-button>
+            </div>
             <div class="action-btns" v-else-if="order.status === 2">
               <van-button size="small" type="success" @click.stop="handleComplete(order)">确认送达</van-button>
             </div>
@@ -186,6 +190,7 @@ const formatDate = (date) => {
 const statusMap = {
   all: null,
   pending: 6,
+  accepted: 1,
   delivering: 2,
   completed: 3
 }
@@ -310,11 +315,18 @@ const handleReject = async (order) => {
 // 开始配送
 const handleStartDelivery = async (order) => {
   try {
+    await showDialog({
+      title: '开始配送',
+      message: `确定开始配送订单 ${order.dispatchNo} 吗？`,
+      showCancelButton: true
+    })
     await startDelivery(order.id)
     showToast('已开始配送')
     onTabChange()
   } catch (error) {
-    console.error('开始配送失败:', error)
+    if (error !== 'cancel') {
+      console.error('开始配送失败:', error)
+    }
   }
 }
 
@@ -355,10 +367,11 @@ const formatTime = (time) => {
 // 状态标签类型
 const getStatusTag = (status) => {
   const map = {
-    2: 'primary',
-    3: 'default',
-    6: 'primary',
-    7: 'danger'
+    1: 'warning',   // 已接单
+    2: 'primary',   // 配送中
+    3: 'default',   // 已完成
+    6: 'primary',   // 已派给配送员
+    7: 'danger'     // 配送员拒单
   }
   return map[status] || 'default'
 }

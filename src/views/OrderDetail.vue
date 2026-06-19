@@ -83,8 +83,42 @@
       </div>
     </div>
 
-    <!-- 配送导航地图（有目的地坐标时显示） -->
-    <div class="section-card" v-if="hasDestination">
+    <!-- 桶借还管理（仅待接单和配送中显示） -->
+    <div class="section-card" v-if="showBucketSection">
+      <div class="section-title">
+        <van-icon name="bag-o" /> 桶借还管理
+      </div>
+      <div class="bucket-info">
+        <div class="bucket-item">
+          <div class="bucket-label">本次借桶数量</div>
+          <van-stepper
+            v-model="borrowQuantity"
+            :min="0"
+            :max="maxBorrowQuantity"
+            theme="round"
+            button-size="28px"
+            input-width="60px"
+            @change="handleBorrowQuantityChange"
+          />
+          <div class="bucket-hint">客户需要借用的空桶数量（最多{{ maxBorrowQuantity }}个）</div>
+        </div>
+        <div class="bucket-item">
+          <div class="bucket-label">本次还桶数量</div>
+          <van-stepper
+            v-model="returnQuantity"
+            :min="0"
+            :max="99"
+            theme="round"
+            button-size="28px"
+            input-width="60px"
+          />
+          <div class="bucket-hint">客户归还的空桶数量</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 配送导航地图（有目的地坐标且未送达时显示） -->
+    <div class="section-card" v-if="hasDestination && order.status !== 3">
       <div class="section-title">
         {{ order.status === 2 ? '配送导航' : '配送路线' }}
       </div>
@@ -127,6 +161,10 @@
         <van-button block @click="handleReject">拒单</van-button>
         <van-button block type="primary" @click="handleAccept">接单</van-button>
       </template>
+      <!-- status=1: 已接单，等待开始配送 -->
+      <template v-else-if="order.status === 1">
+        <van-button block type="success" @click="handleStartDelivery">开始配送</van-button>
+      </template>
       <!-- status=2: 配送中 -->
       <template v-else-if="order.status === 2">
         <van-button block type="success" @click="handleComplete">确认送达</van-button>
@@ -140,12 +178,22 @@ import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue'
 import { useRoute } from 'vue-router'
 import { showDialog, showToast } from 'vant'
 import { getOrderDetail, acceptOrder, rejectOrder, startDelivery, completeOrder, getCurrentLocation } from '@/api/delivery'
+import { borrowBucket, returnBucket } from '@/api/bucket'
 import { useLocation } from '@/composables/useLocation'
 import { useUserStore } from '@/stores/user'
 
 const route = useRoute()
 const userStore = useUserStore()
 const order = ref(null)
+
+// 桶借还数量
+const borrowQuantity = ref(0)
+const returnQuantity = ref(0)
+
+// 计算最大借桶数量（不能超过订单商品总量）
+const maxBorrowQuantity = computed(() => {
+  return order.value?.quantity || 0
+})
 
 // 使用位置管理 composable
 const { currentLng, currentLat, hasLocation, fetchLocation, startReport, stopReport, getLocation } = useLocation()
@@ -180,14 +228,21 @@ const hasDestination = computed(() => {
 
 const showActions = computed(() => {
   if (!order.value) return false
-  return [2, 6].includes(order.value.status)
+  return [1, 2, 6].includes(order.value.status)
+})
+
+// 是否显示桶借还板块（待接单、已接单和配送中显示）
+const showBucketSection = computed(() => {
+  if (!order.value) return false
+  return [1, 2, 6].includes(order.value.status)
 })
 
 // 配送进度步骤
 const stepActive = computed(() => {
   if (!order.value) return 0
   switch (order.value.status) {
-    case 6: return 0  // 已接单（已派给配送员）
+    case 6: return 0  // 已派给配送员
+    case 1: return 0  // 已接单
     case 2: return 1  // 配送中
     case 3: return 2  // 已送达
     default: return 0
@@ -200,13 +255,17 @@ const loadDetail = async () => {
     const res = await getOrderDetail(route.params.id)
     order.value = res.data
     
+    // 重置桶借还数量
+    borrowQuantity.value = 0
+    returnQuantity.value = 0
+    
     // 有目的地坐标就初始化地图（不等定位）
     if (hasDestination.value) {
       nextTick(() => initMap())
     }
     
-    // status=6 或 status=2 都启动位置上报
-    if ([2, 6].includes(order.value.status)) {
+    // status=1 或 status=2 都启动位置上报
+    if ([1, 2].includes(order.value.status)) {
       startReport(order.value.id)
     }
     
@@ -508,6 +567,24 @@ const handleReject = async () => {
   }
 }
 
+// 开始配送
+const handleStartDelivery = async () => {
+  try {
+    await showDialog({
+      title: '开始配送',
+      message: `确定开始配送订单 ${order.value.dispatchNo} 吗？`,
+      showCancelButton: true
+    })
+    await startDelivery(order.value.id)
+    showToast('已开始配送')
+    loadDetail()
+  } catch (error) {
+    if (error !== 'cancel') {
+      console.error('开始配送失败:', error)
+    }
+  }
+}
+
 // 确认送达
 const handleComplete = async () => {
   try {
@@ -516,14 +593,99 @@ const handleComplete = async () => {
       message: '确认订单已送达客户？',
       showCancelButton: true
     })
+    
+    // 先调用完成接口
     await completeOrder(order.value.id)
     showToast('已确认送达')
+    
+    // 异步处理桶借还（不阻断主流程，失败仅提示警告）
+    handleBucketOperations().catch(error => {
+      console.warn('[桶管理] 桶记录更新失败（不影响订单状态）:', error)
+      showToast({ type: 'warning', message: '桶记录更新失败，请联系管理员' })
+    })
+    
     stopReport()
     loadDetail()
   } catch (error) {
     if (error !== 'cancel') {
       console.error('确认送达失败:', error)
     }
+  }
+}
+
+// 处理桶借还操作
+const handleBucketOperations = async () => {
+  const address = order.value.deliveryAddress
+  const contactName = order.value.customerName || '未知'
+  const customerPhone = order.value.customerPhone
+  const dispatchNo = order.value.dispatchNo
+  
+  console.log('[桶管理] 准备上报桶借还信息:', {
+    address,
+    contactName,
+    phone: customerPhone,
+    dispatchNo,
+    borrowQuantity: borrowQuantity.value,
+    returnQuantity: returnQuantity.value
+  })
+  
+  // 借桶
+  if (borrowQuantity.value > 0) {
+    try {
+      console.log('[桶管理] 调用借桶接口:', {
+        address,
+        contactName,
+        phone: customerPhone,
+        borrowOrderId: dispatchNo,
+        quantity: borrowQuantity.value
+      })
+      await borrowBucket({
+        address,
+        contactName,
+        phone: customerPhone,
+        borrowOrderId: dispatchNo,
+        quantity: borrowQuantity.value,
+        remark: `配送员配送时借桶`
+      })
+      console.log('[桶管理] 借桶成功:', borrowQuantity.value)
+    } catch (error) {
+      console.error('[桶管理] 借桶失败:', error)
+      showToast('桶记录更新失败，请联系管理员')
+    }
+  }
+  
+  // 还桶
+  if (returnQuantity.value > 0) {
+    try {
+      console.log('[桶管理] 调用还桶接口:', {
+        address,
+        contactName,
+        phone: customerPhone,
+        sourceOrderId: dispatchNo,
+        quantity: returnQuantity.value
+      })
+      await returnBucket({
+        address,
+        contactName,
+        phone: customerPhone,
+        sourceOrderId: dispatchNo,
+        quantity: returnQuantity.value,
+        remark: `配送员配送时回收空桶`
+      })
+      console.log('[桶管理] 还桶成功:', returnQuantity.value)
+    } catch (error) {
+      console.error('[桶管理] 还桶失败:', error)
+      showToast('桶记录更新失败，请联系管理员')
+    }
+  }
+}
+
+// 借桶数量变化时的校验
+const handleBorrowQuantityChange = (value) => {
+  const maxQty = maxBorrowQuantity.value
+  if (value > maxQty) {
+    showToast(`借桶数量不能超过订单总量（${maxQty}个）`)
+    borrowQuantity.value = maxQty
   }
 }
 
@@ -542,10 +704,11 @@ const formatTime = (time) => {
 // 状态标签类型
 const getStatusTag = (status) => {
   const map = {
-    2: 'primary',
-    3: 'default',
-    6: 'primary',
-    7: 'danger'
+    1: 'warning',   // 已接单
+    2: 'primary',   // 配送中
+    3: 'default',   // 已完成
+    6: 'primary',   // 已派给配送员
+    7: 'danger'     // 配送员拒单
   }
   return map[status] || 'default'
 }
@@ -683,5 +846,36 @@ onUnmounted(() => {
   font-size: 14px;
   color: #1890FF;
   font-weight: 500;
+}
+
+// 桶借还管理样式
+.bucket-info {
+  .bucket-item {
+    margin-bottom: 20px;
+    padding: 12px;
+    background: #F7F8FA;
+    border-radius: 8px;
+
+    &:last-child {
+      margin-bottom: 0;
+    }
+
+    .bucket-label {
+      font-size: 14px;
+      color: #333333;
+      font-weight: 500;
+      margin-bottom: 10px;
+    }
+
+    .van-stepper {
+      margin-bottom: 8px;
+    }
+
+    .bucket-hint {
+      font-size: 12px;
+      color: #999999;
+      margin-top: 6px;
+    }
+  }
 }
 </style>

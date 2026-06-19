@@ -16,7 +16,7 @@
     
     <van-tabbar v-model="activeTab" active-color="#333333" inactive-color="#999999">
       <van-tabbar-item name="home" icon="wap-home" to="/home">工作台</van-tabbar-item>
-      <van-tabbar-item name="orders" icon="orders" to="/orders">我的订单</van-tabbar-item>
+      <van-tabbar-item name="orders" icon="orders-o" to="/orders">我的订单</van-tabbar-item>
       <van-tabbar-item name="profile" icon="contact" to="/profile">个人中心</van-tabbar-item>
     </van-tabbar>
   </div>
