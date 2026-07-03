@@ -8,7 +8,7 @@
       <div class="user-info">
         <div class="user-name">{{ userInfo.realName || '配送员' }}</div>
         <div class="user-detail">工号：{{ userInfo.employeeNo || '-' }}</div>
-        <div class="user-detail">所属站点：{{ userInfo.stationName || '-' }}</div>
+        <div class="user-detail">所属供货商：{{ userInfo.supplierName || '-' }}</div>
       </div>
     </div>
     
