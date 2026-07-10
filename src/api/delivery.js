@@ -36,8 +36,11 @@ export function startDelivery(id) {
 }
 
 // 确认送达
-export function completeOrder(id) {
-  return request.post(`/delivery/orders/${id}/complete`)
+export function completeOrder(id, borrowBucketCount, returnBucketCount) {
+  return request.post(`/delivery/orders/${id}/complete`, {
+    borrowBucketCount,
+    returnBucketCount
+  })
 }
 
 // 获取个人信息

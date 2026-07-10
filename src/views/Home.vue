@@ -18,21 +18,21 @@
     <div class="stats-card">
       <div class="stats-title">今日数据</div>
       <div class="stats-grid">
-        <div class="stats-item">
+        <div class="stats-item" @click="goToOrders('completed')">
           <div class="stats-value">{{ stats.completedCount || 0 }}</div>
           <div class="stats-label">已完成</div>
         </div>
-        <div class="stats-item">
-          <div class="stats-value">{{ (stats.deliveringCount || 0) + acceptedOrders.length }}</div>
+        <div class="stats-item" @click="goToOrders('delivering')">
+          <div class="stats-value">{{ stats.deliveringCount || 0 }}</div>
           <div class="stats-label">配送中</div>
         </div>
-        <div class="stats-item">
+        <div class="stats-item" @click="goToOrders('accepted')">
+          <div class="stats-value">{{ stats.acceptedCount || 0 }}</div>
+          <div class="stats-label">待配送</div>
+        </div>
+        <div class="stats-item" @click="goToOrders('pending')">
           <div class="stats-value">{{ stats.pendingCount || 0 }}</div>
           <div class="stats-label">待接单</div>
-        </div>
-        <div class="stats-item">
-          <div class="stats-value">¥{{ stats.todayIncome?.toFixed(2) || '0.00' }}</div>
-          <div class="stats-label">今日收入</div>
         </div>
       </div>
     </div>
@@ -147,8 +147,13 @@ const pendingOrders = computed(() => {
 
 // 已接单订单（需要点击"开始配送"）
 const acceptedOrders = computed(() => {
-  return orders.value.filter(order => order.status === 1)
+  return orders.value.filter(order => order.status === 8)
 })
+
+// 点击数字跳转到我的订单页面
+const goToOrders = (tab) => {
+  router.push({ path: '/orders', query: { tab } })
+}
 
 // 加载数据
 const loadData = async () => {

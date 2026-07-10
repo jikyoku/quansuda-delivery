@@ -99,7 +99,7 @@
               <van-button size="small" @click.stop="handleReject(order)">拒单</van-button>
               <van-button size="small" type="primary" @click.stop="handleAccept(order)">接单</van-button>
             </div>
-            <div class="action-btns" v-else-if="order.status === 1">
+            <div class="action-btns" v-else-if="order.status === 8">
               <van-button size="small" type="success" @click.stop="handleStartDelivery(order)">开始配送</van-button>
             </div>
             <div class="action-btns" v-else-if="order.status === 2">
@@ -118,12 +118,13 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue'
-import { useRouter } from 'vue-router'
+import { ref, computed, onMounted, watch } from 'vue'
+import { useRouter, useRoute } from 'vue-router'
 import { showDialog, showToast } from 'vant'
 import { getOrderList, acceptOrder, rejectOrder, startDelivery, completeOrder } from '@/api/delivery'
 
 const router = useRouter()
+const route = useRoute()
 const activeTab = ref('all')
 const orderList = ref([])
 const loading = ref(false)
@@ -190,7 +191,7 @@ const formatDate = (date) => {
 const statusMap = {
   all: null,
   pending: 6,
-  accepted: 1,
+  accepted: 8,
   delivering: 2,
   completed: 3
 }
@@ -367,17 +368,31 @@ const formatTime = (time) => {
 // 状态标签类型
 const getStatusTag = (status) => {
   const map = {
-    1: 'warning',   // 已接单
+    1: 'warning',   // 供货商已接单
     2: 'primary',   // 配送中
     3: 'default',   // 已完成
     6: 'primary',   // 已派给配送员
-    7: 'danger'     // 配送员拒单
+    7: 'danger',    // 配送员拒单
+    8: 'warning'    // 配送员已接单待配送
   }
   return map[status] || 'default'
 }
 
 onMounted(() => {
+  const tab = route.query.tab
+  if (tab && ['all', 'pending', 'accepted', 'delivering', 'completed'].includes(tab)) {
+    activeTab.value = tab
+  }
   onLoad()
+})
+
+watch(() => route.query.tab, (newTab) => {
+  if (newTab && ['all', 'pending', 'accepted', 'delivering', 'completed'].includes(newTab)) {
+    activeTab.value = newTab
+    orderList.value = []
+    finished.value = false
+    onLoad()
+  }
 })
 </script>
 

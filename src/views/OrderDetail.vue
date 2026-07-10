@@ -9,7 +9,7 @@
     </div>
 
     <!-- 配送进度条（已接单/配送中/已送达） -->
-    <div class="section-card" v-if="[2, 3, 6].includes(order.status)">
+    <div class="section-card" v-if="[2, 3, 6, 8].includes(order.status)">
       <van-steps :active="stepActive" active-color="#1890FF">
         <van-step>已接单</van-step>
         <van-step>配送中</van-step>
@@ -70,8 +70,12 @@
         <span class="value">{{ formatTime(order.dispatchTime) }}</span>
       </div>
       <div class="info-row" v-if="order.acceptTime">
-        <span class="label">接单时间</span>
+        <span class="label">供货商接单</span>
         <span class="value">{{ formatTime(order.acceptTime) }}</span>
+      </div>
+      <div class="info-row" v-if="order.deliveryAcceptTime">
+        <span class="label">配送员接单</span>
+        <span class="value">{{ formatTime(order.deliveryAcceptTime) }}</span>
       </div>
       <div class="info-row" v-if="order.startDeliveryTime">
         <span class="label">开始配送</span>
@@ -81,9 +85,17 @@
         <span class="label">完成时间</span>
         <span class="value">{{ formatTime(order.completeTime) }}</span>
       </div>
+      <div class="info-row" v-if="order.borrowBucketCount > 0">
+        <span class="label">借桶数量</span>
+        <span class="value">{{ order.borrowBucketCount }}个</span>
+      </div>
+      <div class="info-row" v-if="order.returnBucketCount > 0">
+        <span class="label">还桶数量</span>
+        <span class="value">{{ order.returnBucketCount }}个</span>
+      </div>
     </div>
 
-    <!-- 桶借还管理（仅待接单和配送中显示） -->
+    <!-- 桶借还管理（仅配送中显示） -->
     <div class="section-card" v-if="showBucketSection">
       <div class="section-title">
         <van-icon name="bag-o" /> 桶借还管理
@@ -161,8 +173,8 @@
         <van-button block @click="handleReject">拒单</van-button>
         <van-button block type="primary" @click="handleAccept">接单</van-button>
       </template>
-      <!-- status=1: 已接单，等待开始配送 -->
-      <template v-else-if="order.status === 1">
+      <!-- status=8: 配送员已接单，等待开始配送 -->
+      <template v-else-if="order.status === 8">
         <van-button block type="success" @click="handleStartDelivery">开始配送</van-button>
       </template>
       <!-- status=2: 配送中 -->
@@ -228,13 +240,13 @@ const hasDestination = computed(() => {
 
 const showActions = computed(() => {
   if (!order.value) return false
-  return [1, 2, 6].includes(order.value.status)
+  return [2, 6, 8].includes(order.value.status)
 })
 
-// 是否显示桶借还板块（待接单、已接单和配送中显示）
+// 是否显示桶借还板块（仅配送中显示）
 const showBucketSection = computed(() => {
   if (!order.value) return false
-  return [1, 2, 6].includes(order.value.status)
+  return order.value.status === 2
 })
 
 // 配送进度步骤
@@ -242,7 +254,7 @@ const stepActive = computed(() => {
   if (!order.value) return 0
   switch (order.value.status) {
     case 6: return 0  // 已派给配送员
-    case 1: return 0  // 已接单
+    case 8: return 0  // 配送员已接单待配送
     case 2: return 1  // 配送中
     case 3: return 2  // 已送达
     default: return 0
@@ -588,18 +600,21 @@ const handleStartDelivery = async () => {
 // 确认送达
 const handleComplete = async () => {
   try {
+    const message = `确认订单已送达客户？\n\n借桶数量：${borrowQuantity.value}个\n还桶数量：${returnQuantity.value}个`
     await showDialog({
       title: '确认送达',
-      message: '确认订单已送达客户？',
+      message: message,
       showCancelButton: true
     })
     
-    // 先调用完成接口
-    await completeOrder(order.value.id)
+    const currentOrder = order.value
+    const currentBorrowQty = borrowQuantity.value
+    const currentReturnQty = returnQuantity.value
+    
+    await completeOrder(currentOrder.id, currentBorrowQty, currentReturnQty)
     showToast('已确认送达')
     
-    // 异步处理桶借还（不阻断主流程，失败仅提示警告）
-    handleBucketOperations().catch(error => {
+    handleBucketOperations(currentOrder, currentBorrowQty, currentReturnQty).catch(error => {
       console.warn('[桶管理] 桶记录更新失败（不影响订单状态）:', error)
       showToast({ type: 'warning', message: '桶记录更新失败，请联系管理员' })
     })
@@ -614,67 +629,79 @@ const handleComplete = async () => {
 }
 
 // 处理桶借还操作
-const handleBucketOperations = async () => {
-  const address = order.value.deliveryAddress
-  const contactName = order.value.customerName || '未知'
-  const customerPhone = order.value.customerPhone
-  const dispatchNo = order.value.dispatchNo
+const handleBucketOperations = async (currentOrder, borrowQty, returnQty) => {
+  console.log('[桶管理] handleBucketOperations 被调用:', {
+    borrowQty,
+    returnQty,
+    currentOrder: currentOrder ? currentOrder.id : null,
+    dispatchNo: currentOrder ? currentOrder.dispatchNo : null
+  })
+  
+  if (borrowQty <= 0 && returnQty <= 0) {
+    console.log('[桶管理] 借还桶数量都为0，跳过操作')
+    return
+  }
+  
+  const address = currentOrder.deliveryAddress
+  const contactName = currentOrder.customerName || '未知'
+  const customerPhone = currentOrder.customerPhone || '未知'
+  const dispatchNo = currentOrder.dispatchNo
   
   console.log('[桶管理] 准备上报桶借还信息:', {
     address,
     contactName,
     phone: customerPhone,
     dispatchNo,
-    borrowQuantity: borrowQuantity.value,
-    returnQuantity: returnQuantity.value
+    borrowQuantity: borrowQty,
+    returnQuantity: returnQty
   })
   
   // 借桶
-  if (borrowQuantity.value > 0) {
+  if (borrowQty > 0) {
     try {
       console.log('[桶管理] 调用借桶接口:', {
         address,
         contactName,
         phone: customerPhone,
         borrowOrderId: dispatchNo,
-        quantity: borrowQuantity.value
+        quantity: borrowQty
       })
-      await borrowBucket({
+      const borrowResult = await borrowBucket({
         address,
         contactName,
         phone: customerPhone,
         borrowOrderId: dispatchNo,
-        quantity: borrowQuantity.value,
+        quantity: borrowQty,
         remark: `配送员配送时借桶`
       })
-      console.log('[桶管理] 借桶成功:', borrowQuantity.value)
+      console.log('[桶管理] 借桶成功:', borrowResult)
     } catch (error) {
-      console.error('[桶管理] 借桶失败:', error)
+      console.error('[桶管理] 借桶失败:', error, error.message, error.response)
       showToast('桶记录更新失败，请联系管理员')
     }
   }
   
   // 还桶
-  if (returnQuantity.value > 0) {
+  if (returnQty > 0) {
     try {
       console.log('[桶管理] 调用还桶接口:', {
         address,
         contactName,
         phone: customerPhone,
         sourceOrderId: dispatchNo,
-        quantity: returnQuantity.value
+        quantity: returnQty
       })
-      await returnBucket({
+      const returnResult = await returnBucket({
         address,
         contactName,
         phone: customerPhone,
         sourceOrderId: dispatchNo,
-        quantity: returnQuantity.value,
+        quantity: returnQty,
         remark: `配送员配送时回收空桶`
       })
-      console.log('[桶管理] 还桶成功:', returnQuantity.value)
+      console.log('[桶管理] 还桶成功:', returnResult)
     } catch (error) {
-      console.error('[桶管理] 还桶失败:', error)
+      console.error('[桶管理] 还桶失败:', error, error.message, error.response)
       showToast('桶记录更新失败，请联系管理员')
     }
   }
@@ -704,11 +731,12 @@ const formatTime = (time) => {
 // 状态标签类型
 const getStatusTag = (status) => {
   const map = {
-    1: 'warning',   // 已接单
+    1: 'warning',   // 供货商已接单
     2: 'primary',   // 配送中
     3: 'default',   // 已完成
     6: 'primary',   // 已派给配送员
-    7: 'danger'     // 配送员拒单
+    7: 'danger',    // 配送员拒单
+    8: 'warning'    // 配送员已接单待配送
   }
   return map[status] || 'default'
 }
