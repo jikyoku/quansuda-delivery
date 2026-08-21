@@ -17,7 +17,6 @@
       <van-cell title="今日统计" icon="bar-chart-o" is-link @click="goToStats" />
       <van-cell title="我的订单" icon="orders" is-link @click="goToOrders" />
       <van-cell title="修改密码" icon="lock" is-link @click="showPasswordDialog" />
-      <van-cell title="健康证信息" icon="certificate" is-link />
     </van-cell-group>
     
     <!-- 退出登录 -->
@@ -59,14 +58,30 @@
 </template>
 
 <script setup>
-import { ref, reactive } from 'vue'
+import { ref, reactive, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { showDialog, showToast } from 'vant'
 import { useUserStore } from '@/stores/user'
+import { getProfile } from '@/api/delivery'
 
 const router = useRouter()
 const userStore = useUserStore()
 const userInfo = userStore.userInfo
+
+const loadProfile = async () => {
+  try {
+    const res = await getProfile()
+    if (res.data) {
+      userStore.setUserInfo(res.data)
+    }
+  } catch (e) {
+    console.error('加载个人信息失败:', e)
+  }
+}
+
+onMounted(() => {
+  loadProfile()
+})
 
 const passwordDialogVisible = ref(false)
 const passwordForm = reactive({

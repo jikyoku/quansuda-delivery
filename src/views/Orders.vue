@@ -94,7 +94,6 @@
           </div>
           
           <div class="order-footer">
-            <span class="settlement-amount">结算金额：¥{{ order.settlementAmount?.toFixed(2) }}</span>
             <div class="action-btns" v-if="order.status === 6">
               <van-button size="small" @click.stop="handleReject(order)">拒单</van-button>
               <van-button size="small" type="primary" @click.stop="handleAccept(order)">接单</van-button>
@@ -370,10 +369,12 @@ const getStatusTag = (status) => {
   const map = {
     1: 'warning',   // 供货商已接单
     2: 'primary',   // 配送中
-    3: 'default',   // 已完成
+    3: 'success',   // 已完成(审核通过)
     6: 'primary',   // 已派给配送员
     7: 'danger',    // 配送员拒单
-    8: 'warning'    // 配送员已接单待配送
+    8: 'warning',   // 配送员已接单待配送
+    9: 'warning',   // 待平台审核
+    10: 'danger'    // 审核驳回
   }
   return map[status] || 'default'
 }
@@ -509,12 +510,6 @@ watch(() => route.query.tab, (newTab) => {
       align-items: center;
       padding-top: 12px;
       border-top: 1px solid #F5F5F5;
-      
-      .settlement-amount {
-        font-size: 14px;
-        color: #FF6B6B;
-        font-weight: 600;
-      }
       
       .action-btns {
         display: flex;

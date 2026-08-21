@@ -24,6 +24,10 @@ request.interceptors.request.use(
 // 响应拦截器
 request.interceptors.response.use(
   response => {
+    // blob响应（图片/文件加载），直接返回二进制数据
+    if (response.config.responseType === 'blob') {
+      return response.data
+    }
     const res = response.data
     if (res.code !== 200) {
       showToast(res.message || '请求失败')

@@ -82,3 +82,31 @@ export function getDeliveryTrack(dispatchId) {
 export function getCurrentLocation(dispatchId) {
   return request.get(`/delivery/location/current/${dispatchId}`)
 }
+
+// 上传配送完成凭证（照片）
+export function uploadProofPhoto(dispatchId, file) {
+  const formData = new FormData()
+  formData.append('file', file)
+  // 移动网络下大图上传较慢，超时放宽到60秒
+  return request.post(`/delivery/orders/${dispatchId}/proof-photo`, formData, {
+    timeout: 60000
+  })
+}
+
+// 加载配送完成凭证图片（二进制，需带认证头）
+export function fetchProofPhoto(attachmentId) {
+  return request.get(`/delivery/attachments/${attachmentId}/preview`, {
+    responseType: 'blob',
+    timeout: 30000
+  })
+}
+
+// 获取配送完成凭证列表
+export function getProofPhotos(dispatchId) {
+  return request.get(`/delivery/orders/${dispatchId}/proof-photos`)
+}
+
+// 删除配送完成凭证
+export function deleteProofPhoto(attachmentId) {
+  return request.delete(`/delivery/proof-photos/${attachmentId}`)
+}

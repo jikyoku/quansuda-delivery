@@ -8,12 +8,27 @@
       <div class="dispatch-no">{{ order.dispatchNo }}</div>
     </div>
 
-    <!-- 配送进度条（已接单/配送中/已送达） -->
-    <div class="section-card" v-if="[2, 3, 6, 8].includes(order.status)">
+    <!-- 审核驳回提示 -->
+    <div class="section-card reject-notice" v-if="order.status === 10">
+      <van-icon name="warning-o" color="#ee0a24" />
+      <span class="reject-title">平台审核驳回</span>
+      <div class="reject-reason">驳回原因：{{ order.reviewRemark || '未说明' }}</div>
+      <div class="reject-tip">请根据驳回原因调整后重新提交</div>
+    </div>
+
+    <!-- 审核中提示 -->
+    <div class="section-card review-notice" v-if="order.status === 9">
+      <van-icon name="clock-o" color="#ff976a" />
+      <span>凭证已提交，等待平台审核，请耐心等待</span>
+    </div>
+
+    <!-- 配送进度条（已接单/配送中/已送达/审核） -->
+    <div class="section-card" v-if="[2, 3, 6, 8, 9, 10].includes(order.status)">
       <van-steps :active="stepActive" active-color="#1890FF">
         <van-step>已接单</van-step>
         <van-step>配送中</van-step>
         <van-step>已送达</van-step>
+        <van-step>平台审核</van-step>
       </van-steps>
     </div>
 
@@ -22,23 +37,23 @@
       <div class="section-title">商品信息</div>
       <div class="info-row">
         <span class="label">商品名称</span>
-        <span class="value">{{ order.productName }}</span>
+        <span class="value">{{ order.skuName || order.productName }}</span>
       </div>
-      <div class="info-row">
+      <div class="info-row" v-if="order.productSpec">
         <span class="label">商品规格</span>
-        <span class="value">{{ order.productSpec || '-' }}</span>
+        <span class="value">{{ order.productSpec }}</span>
+      </div>
+      <div class="info-row" v-if="order.packageType">
+        <span class="label">包装类型</span>
+        <span class="value">{{ order.packageType }}</span>
       </div>
       <div class="info-row">
         <span class="label">派送数量</span>
         <span class="value">{{ order.quantity }}</span>
       </div>
-      <div class="info-row">
-        <span class="label">单价</span>
-        <span class="value">¥{{ order.unitPrice?.toFixed(2) }}</span>
-      </div>
-      <div class="info-row">
-        <span class="label">结算金额</span>
-        <span class="value price">¥{{ order.settlementAmount?.toFixed(2) }}</span>
+      <div class="info-row" v-if="order.dispatchReason">
+        <span class="label">备注</span>
+        <span class="value remark-value">{{ order.dispatchReason }}</span>
       </div>
     </div>
 
@@ -166,6 +181,46 @@
       </div>
     </div>
 
+    <!-- 配送完成凭证（配送中可上传，已完成后只读查看） -->
+    <div class="section-card proof-photo-section" v-if="showProofPhotoSection">
+      <div class="section-title">
+        <van-icon name="photograph" /> 配送完成凭证
+        <span class="proof-required-tag" v-if="!isProofReadonly">必填</span>
+      </div>
+      <div class="proof-photo-tip" v-if="!isProofReadonly">
+        <van-icon name="info-o" />
+        <span>请上传配送完成的现场照片或客户签收凭证，完成后需提交凭证才能确认送达</span>
+      </div>
+      <!-- 配送中：使用 uploader 可上传 -->
+      <van-uploader
+        v-if="!isProofReadonly"
+        v-model="proofPhotoList"
+        :max-count="MAX_PHOTOS"
+        :max-size="10 * 1024 * 1024"
+        accept="image/*"
+        :deletable="true"
+        :show-upload="true"
+        :after-read="handleAfterRead"
+        @delete="handleDelete"
+        @oversize="handleOversize"
+      />
+      <!-- 已完成：只读模式，用img展示，点击触发预览 -->
+      <div class="proof-readonly-grid" v-else-if="completedPhotoCount > 0">
+        <img
+          v-for="(photo, index) in proofPhotoList"
+          :key="photo.attachmentId || index"
+          :src="photo.url"
+          class="proof-thumb"
+          @click="handleClickPreview(index)"
+        />
+      </div>
+      <div class="proof-photo-count">
+        已上传 <span class="count-num">{{ completedPhotoCount }}</span> / {{ MAX_PHOTOS }} 张
+        <span class="count-hint" v-if="!isProofReadonly && !hasProofPhotos">（至少上传1张）</span>
+        <span class="count-tip" v-if="isProofReadonly && completedPhotoCount > 0">（点击图片可放大查看）</span>
+      </div>
+    </div>
+
     <!-- 底部操作栏 -->
     <div class="action-bar" v-if="showActions">
       <!-- status=6: 已派给配送员，待接单 -->
@@ -179,17 +234,81 @@
       </template>
       <!-- status=2: 配送中 -->
       <template v-else-if="order.status === 2">
-        <van-button block type="success" @click="handleComplete">确认送达</van-button>
+        <van-button 
+          block 
+          type="success" 
+          :disabled="!hasProofPhotos"
+          @click="handleComplete"
+        >
+          确认送达
+        </van-button>
+        <div class="action-tip" v-if="!hasProofPhotos">
+          <van-icon name="warning-o" /> 请先上传配送完成凭证
+        </div>
+      </template>
+      <!-- status=10: 审核驳回，可重新提交 -->
+      <template v-else-if="order.status === 10">
+        <van-button 
+          block 
+          type="warning" 
+          :disabled="!hasProofPhotos"
+          @click="handleComplete"
+        >
+          重新提交凭证
+        </van-button>
+        <div class="action-tip" v-if="!hasProofPhotos">
+          <van-icon name="warning-o" /> 请先上传配送完成凭证
+        </div>
       </template>
     </div>
+
+    <!-- 确认送达弹窗：必须上传客户签收凭证后才能提交 -->
+    <van-dialog
+      v-model:show="completeDialogVisible"
+      title="确认送达"
+      :show-confirm-button="false"
+      close-on-click-overlay
+    >
+      <div class="complete-dialog-content">
+        <div class="complete-tip">
+          <van-icon name="info-o" />
+          <span>请客户签收后，上传现场签收凭证（至少1张），确认送达后才能提交</span>
+        </div>
+        <div class="complete-proof-upload">
+          <van-uploader
+            v-model="proofPhotoList"
+            :max-count="MAX_PHOTOS"
+            :max-size="10 * 1024 * 1024"
+            accept="image/*"
+            :after-read="handleAfterRead"
+            @delete="handleDelete"
+            @oversize="handleOversize"
+          />
+          <div class="proof-photo-count">
+            已上传 <span class="count-num">{{ completedPhotoCount }}</span> / {{ MAX_PHOTOS }} 张
+            <span class="count-hint" v-if="!hasProofPhotos">（至少上传1张）</span>
+            <span class="count-tip" v-else>（点击图片可放大查看）</span>
+          </div>
+        </div>
+        <div class="complete-bucket-info" v-if="borrowQuantity > 0 || returnQuantity > 0">
+          <div class="bucket-line">本次借桶：<b>{{ borrowQuantity }}</b> 个　本次还桶：<b>{{ returnQuantity }}</b> 个</div>
+        </div>
+      </div>
+      <template #footer>
+        <van-button @click="completeDialogVisible = false">取消</van-button>
+        <van-button type="primary" :disabled="!hasProofPhotos" :loading="completing" @click="completeDialogConfirm">
+          确认送达
+        </van-button>
+      </template>
+    </van-dialog>
   </div>
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue'
+import { ref, computed, onMounted, onUnmounted, nextTick, watch } from 'vue'
 import { useRoute } from 'vue-router'
-import { showDialog, showToast } from 'vant'
-import { getOrderDetail, acceptOrder, rejectOrder, startDelivery, completeOrder, getCurrentLocation } from '@/api/delivery'
+import { showDialog, showToast, showImagePreview } from 'vant'
+import { getOrderDetail, acceptOrder, rejectOrder, startDelivery, completeOrder, getCurrentLocation, uploadProofPhoto, getProofPhotos, deleteProofPhoto, fetchProofPhoto } from '@/api/delivery'
 import { borrowBucket, returnBucket } from '@/api/bucket'
 import { useLocation } from '@/composables/useLocation'
 import { useUserStore } from '@/stores/user'
@@ -201,6 +320,65 @@ const order = ref(null)
 // 桶借还数量
 const borrowQuantity = ref(0)
 const returnQuantity = ref(0)
+const completeDialogVisible = ref(false)
+const completing = ref(false)
+
+// 配送完成凭证
+const proofPhotoList = ref([])
+const proofPhotoLoading = ref(false)
+const MAX_PHOTOS = 9
+
+// 待上传文件缓存（处理竞态：用户选图早于订单数据加载完成）
+const pendingUploadFiles = ref([])
+const processingUpload = ref(false)
+
+// 处理待上传文件的核心函数
+const processUploadFiles = async (fileList) => {
+  for (const file of fileList) {
+    try {
+      const rawFile = file.file || file
+      if (!(rawFile instanceof Blob)) {
+        console.warn('[handleAfterRead] rawFile is not a Blob:', typeof rawFile, rawFile)
+        continue
+      }
+      file.status = 'uploading'
+      file.message = '上传中'
+      
+      const res = await uploadProofPhoto(order.value.id, rawFile)
+      
+      file.status = 'done'
+      file.message = ''
+      file.attachmentId = res.data.attachmentId
+      file.fileName = res.data.fileName
+      file.fileSize = res.data.fileSize
+      // 确保 objectUrl 存在（Vant 通常在 after-read 前已设置，但兜底再设一次）
+      if (!file.objectUrl && rawFile instanceof Blob) {
+        file.objectUrl = URL.createObjectURL(rawFile)
+      }
+      // 同时设置 url 属性，确保 Vant 预览正常
+      if (!file.url && file.objectUrl) {
+        file.url = file.objectUrl
+      }
+    } catch (error) {
+      console.error('[handleAfterRead] upload failed:', error)
+      file.status = 'failed'
+      file.message = '上传失败'
+      showToast('上传失败，请重试')
+    }
+  }
+}
+
+// 当 order 变为可用时，自动处理缓存的待上传文件
+watch(order, async (newVal) => {
+  if (newVal && pendingUploadFiles.value.length > 0 && !processingUpload.value) {
+    processingUpload.value = true
+    const files = [...pendingUploadFiles.value]
+    pendingUploadFiles.value = []
+    console.log('[watch order] processing', files.length, 'pending files')
+    await processUploadFiles(files)
+    processingUpload.value = false
+  }
+})
 
 // 计算最大借桶数量（不能超过订单商品总量）
 const maxBorrowQuantity = computed(() => {
@@ -240,7 +418,7 @@ const hasDestination = computed(() => {
 
 const showActions = computed(() => {
   if (!order.value) return false
-  return [2, 6, 8].includes(order.value.status)
+  return [2, 6, 8, 10].includes(order.value.status)
 })
 
 // 是否显示桶借还板块（仅配送中显示）
@@ -249,6 +427,41 @@ const showBucketSection = computed(() => {
   return order.value.status === 2
 })
 
+// 是否显示凭证区域（配送中/审核中/审核驳回/已完成都显示）
+const showProofPhotoSection = computed(() => {
+  if (!order.value) return false
+  return [2, 3, 9, 10].includes(order.value.status)
+})
+
+// 是否为只读模式（审核中/已完成不能上传/删除，审核驳回可以重新上传）
+const isProofReadonly = computed(() => {
+  return order.value?.status === 3 || order.value?.status === 9
+})
+
+// 是否已上传凭证（使用attachmentId判断，更可靠）
+const hasProofPhotos = computed(() => {
+  return proofPhotoList.value.some(p => p.attachmentId || p.status === 'done')
+})
+
+// 已完成上传的凭证数量
+const completedPhotoCount = computed(() => {
+  return proofPhotoList.value.filter(p => p.attachmentId || p.status === 'done').length
+})
+
+// 只读模式下用于 van-image 预览的图片 URL 列表
+const previewImageList = computed(() => {
+  return proofPhotoList.value.filter(p => p.url).map(p => p.url)
+})
+
+// 点击缩略图时，手动触发带关闭按钮的图片预览
+const handleClickPreview = (index) => {
+  showImagePreview({
+    images: previewImageList.value,
+    startPosition: index,
+    closeable: true,
+  })
+}
+
 // 配送进度步骤
 const stepActive = computed(() => {
   if (!order.value) return 0
@@ -256,7 +469,9 @@ const stepActive = computed(() => {
     case 6: return 0  // 已派给配送员
     case 8: return 0  // 配送员已接单待配送
     case 2: return 1  // 配送中
-    case 3: return 2  // 已送达
+    case 9: return 3  // 待平台审核
+    case 10: return 3 // 审核驳回
+    case 3: return 4  // 已完成(审核通过)
     default: return 0
   }
 })
@@ -283,6 +498,11 @@ const loadDetail = async () => {
     
     // 异步获取位置并绘制路线（不阻塞地图显示）
     initLocationAndDrawRoute()
+    
+    // 加载已上传的凭证
+    if ([2, 3, 9, 10].includes(order.value.status)) {
+      loadProofPhotos()
+    }
   } catch (error) {
     console.error('加载订单详情失败:', error)
   }
@@ -597,22 +817,26 @@ const handleStartDelivery = async () => {
   }
 }
 
-// 确认送达
-const handleComplete = async () => {
+// 确认送达：点击打开弹窗，强制上传客户凭证后提交
+const handleComplete = () => {
+  completeDialogVisible.value = true
+}
+
+// 弹窗内确认提交
+const completeDialogConfirm = async () => {
+  if (!hasProofPhotos.value) {
+    showToast('请先上传配送完成凭证')
+    return
+  }
+  completing.value = true
   try {
-    const message = `确认订单已送达客户？\n\n借桶数量：${borrowQuantity.value}个\n还桶数量：${returnQuantity.value}个`
-    await showDialog({
-      title: '确认送达',
-      message: message,
-      showCancelButton: true
-    })
-    
     const currentOrder = order.value
     const currentBorrowQty = borrowQuantity.value
     const currentReturnQty = returnQuantity.value
     
     await completeOrder(currentOrder.id, currentBorrowQty, currentReturnQty)
     showToast('已确认送达')
+    completeDialogVisible.value = false
     
     handleBucketOperations(currentOrder, currentBorrowQty, currentReturnQty).catch(error => {
       console.warn('[桶管理] 桶记录更新失败（不影响订单状态）:', error)
@@ -622,9 +846,9 @@ const handleComplete = async () => {
     stopReport()
     loadDetail()
   } catch (error) {
-    if (error !== 'cancel') {
-      console.error('确认送达失败:', error)
-    }
+    console.error('确认送达失败:', error)
+  } finally {
+    completing.value = false
   }
 }
 
@@ -716,6 +940,112 @@ const handleBorrowQuantityChange = (value) => {
   }
 }
 
+// 释放已创建的 blob 预览地址
+const revokeProofObjectUrls = () => {
+  proofPhotoList.value.forEach(p => {
+    if (p.objectUrl) {
+      URL.revokeObjectURL(p.objectUrl)
+      p.objectUrl = null
+    }
+  })
+}
+
+// 加载已上传的凭证照片
+const loadProofPhotos = async () => {
+  if (!order.value) return
+  try {
+    proofPhotoLoading.value = true
+    const res = await getProofPhotos(order.value.id)
+    // 先释放旧的 blob 预览地址
+    revokeProofObjectUrls()
+
+    // 逐张带认证加载图片二进制，生成 blob 预览地址（<img> 无法携带 Authorization 头）
+    const list = await Promise.all((res.data || []).map(async (photo) => {
+      const item = {
+        isImage: true,
+        status: 'done',
+        message: '',
+        attachmentId: photo.attachmentId,
+        fileName: photo.fileName,
+        fileSize: photo.fileSize,
+        url: ''
+      }
+      try {
+        const rawBlob = await fetchProofPhoto(photo.attachmentId)
+        const blob = rawBlob?.type?.includes('image/')
+          ? rawBlob
+          : new Blob([rawBlob], { type: rawBlob?.type || 'image/jpeg' })
+        if (blob && blob.type && blob.type.startsWith('image/')) {
+          item.objectUrl = URL.createObjectURL(blob)
+          item.url = item.objectUrl
+        } else {
+          console.error('凭证图片加载失败: 非图片响应', photo.attachmentId, blob?.type)
+        }
+      } catch (error) {
+        console.error('凭证图片加载失败:', photo.attachmentId, error)
+      }
+      return item
+    }))
+    proofPhotoList.value = list
+  } catch (error) {
+    console.error('加载凭证失败:', error)
+  } finally {
+    proofPhotoLoading.value = false
+  }
+}
+
+// Vant uploader after-read 处理（多选模式下 files 为数组）
+const handleAfterRead = async (files) => {
+  console.log('[handleAfterRead] called, order.value:', !!order.value, 'files:', Array.isArray(files) ? files.length : 1)
+  
+  const fileList = Array.isArray(files) ? files : [files]
+  
+  // 核心修复：如果 order 还没加载好，缓存文件等待 watch 触发
+  if (!order.value) {
+    console.warn('[handleAfterRead] order not ready, caching', fileList.length, 'files')
+    pendingUploadFiles.value.push(...fileList)
+    // 同时在 loadDetail 完成后会自动触发 watch 处理
+    // 这里设置一个兜底：3秒后如果还没处理，直接重试
+    setTimeout(async () => {
+      if (order.value && pendingUploadFiles.value.length > 0) {
+        console.log('[handleAfterRead] retry processing cached files')
+        const filesToProcess = [...pendingUploadFiles.value]
+        pendingUploadFiles.value = []
+        await processUploadFiles(filesToProcess)
+      }
+    }, 3000)
+    return
+  }
+  
+  await processUploadFiles(fileList)
+}
+
+// Vant uploader delete 处理
+const handleDelete = (item) => {
+  return new Promise((resolve, reject) => {
+    if (!item.attachmentId) {
+      resolve()
+      return
+    }
+    deleteProofPhoto(item.attachmentId).then(() => {
+      if (item.objectUrl) {
+        URL.revokeObjectURL(item.objectUrl)
+        item.objectUrl = null
+      }
+      resolve()
+    }).catch(error => {
+      console.error('删除凭证失败:', error)
+      showToast('删除失败，请重试')
+      reject()
+    })
+  })
+}
+
+// Vant uploader oversize 处理
+const handleOversize = () => {
+  showToast('文件大小不能超过10MB')
+}
+
 // 格式化时间
 const formatTime = (time) => {
   if (!time) return '-'
@@ -733,10 +1063,12 @@ const getStatusTag = (status) => {
   const map = {
     1: 'warning',   // 供货商已接单
     2: 'primary',   // 配送中
-    3: 'default',   // 已完成
+    3: 'success',   // 已完成(审核通过)
     6: 'primary',   // 已派给配送员
     7: 'danger',    // 配送员拒单
-    8: 'warning'    // 配送员已接单待配送
+    8: 'warning',   // 配送员已接单待配送
+    9: 'warning',   // 待平台审核
+    10: 'danger'    // 审核驳回
   }
   return map[status] || 'default'
 }
@@ -748,6 +1080,7 @@ onMounted(() => {
 
 onUnmounted(() => {
   stopReport()
+  revokeProofObjectUrls()
   if (mapInstance) {
     mapInstance.destroy()
     mapInstance = null
@@ -796,6 +1129,10 @@ onUnmounted(() => {
     margin-bottom: 12px;
     font-size: 14px;
 
+    &:has(.remark-value) {
+      align-items: flex-start;
+    }
+
     .label {
       color: #999999;
       min-width: 80px;
@@ -816,6 +1153,12 @@ onUnmounted(() => {
         text-align: right;
         max-width: 200px;
         word-break: break-all;
+      }
+
+      &.remark-value {
+        text-align: left;
+        word-break: break-all;
+        white-space: pre-wrap;
       }
     }
   }
@@ -905,5 +1248,255 @@ onUnmounted(() => {
       margin-top: 6px;
     }
   }
+}
+
+// 配送完成凭证样式
+.proof-photo-section {
+  // 确保上传预览为方形（防止被全局样式改成圆形头像）
+  :deep(.van-uploader__preview) {
+    border-radius: 6px;
+    overflow: hidden;
+  }
+  :deep(.van-uploader__preview img) {
+    border-radius: 0;
+    object-fit: cover;
+  }
+
+  .proof-required-tag {
+    margin-left: 8px;
+    font-size: 12px;
+    color: #fff;
+    background: #ee0a24;
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-weight: normal;
+    vertical-align: middle;
+  }
+
+  .proof-photo-tip {
+    display: flex;
+    align-items: flex-start;
+    gap: 6px;
+    padding: 8px 12px;
+    background: #fffbe8;
+    border: 1px solid #ffe58f;
+    border-radius: 6px;
+    font-size: 12px;
+    color: #ad6800;
+    margin-bottom: 12px;
+    line-height: 1.5;
+
+    .van-icon {
+      flex-shrink: 0;
+      margin-top: 2px;
+    }
+  }
+
+  .proof-readonly-grid {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-bottom: 4px;
+
+    .proof-thumb {
+      width: 72px;
+      height: 72px;
+      border-radius: 8px;
+      object-fit: cover;
+      cursor: pointer;
+      background: #f7f8fa;
+      display: block;
+    }
+  }
+}
+
+// 凭证计数样式（主页面和弹窗共用）
+.proof-photo-count {
+  margin-top: 12px;
+  font-size: 12px;
+  color: #646566;
+  text-align: center;
+
+  .count-num {
+    color: #1989fa;
+    font-weight: 600;
+    font-size: 14px;
+  }
+
+  .count-hint {
+    color: #ee0a24;
+    margin-left: 4px;
+  }
+
+  .count-tip {
+    color: #969799;
+    margin-left: 4px;
+  }
+}
+
+// 确认送达弹窗样式
+.complete-dialog-content {
+  padding: 0;
+
+  :deep(.van-uploader) {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  :deep(.van-uploader__preview) {
+    width: 72px;
+    height: 72px;
+    border-radius: 8px;
+    overflow: hidden;
+  }
+  :deep(.van-uploader__preview img) {
+    border-radius: 0;
+    object-fit: cover;
+    width: 100%;
+    height: 100%;
+  }
+
+  :deep(.van-uploader__upload) {
+    width: 72px;
+    height: 72px;
+    border-radius: 8px;
+  }
+
+  .complete-tip {
+    display: flex;
+    align-items: flex-start;
+    gap: 6px;
+    font-size: 13px;
+    color: #e6a23c;
+    background: #fdf6ec;
+    border: 1px solid #faecd8;
+    border-radius: 8px;
+    padding: 10px 12px;
+    margin-bottom: 16px;
+    line-height: 1.6;
+
+    .van-icon {
+      flex-shrink: 0;
+      margin-top: 2px;
+      font-size: 16px;
+    }
+  }
+
+  .complete-proof-upload {
+    width: 100%;
+
+    .proof-photo-count {
+      margin-top: 12px;
+    }
+  }
+
+  .complete-bucket-info {
+    margin-top: 16px;
+    padding-top: 12px;
+    border-top: 1px dashed #ebedf0;
+    font-size: 14px;
+    color: #606266;
+    text-align: center;
+
+    b {
+      color: #1989fa;
+      font-size: 16px;
+      margin: 0 2px;
+    }
+  }
+}
+
+// 确认送达弹窗 van-dialog 样式
+:deep(.van-dialog) {
+  width: 92%;
+  max-width: 420px;
+  border-radius: 16px;
+  overflow: hidden;
+
+  .van-dialog__header {
+    padding: 20px 16px 8px;
+    font-size: 17px;
+    font-weight: 600;
+    color: #333;
+    text-align: center;
+  }
+
+  .van-dialog__body {
+    padding: 8px 20px 0;
+    max-height: 60vh;
+    overflow-y: auto;
+  }
+
+  .van-dialog__footer {
+    padding: 16px 20px 20px;
+    display: flex;
+    justify-content: flex-end;
+    gap: 12px;
+    border-top: none;
+
+    .van-button {
+      flex: none;
+      min-width: 96px;
+    }
+  }
+}
+
+.action-tip {
+  margin-top: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  font-size: 12px;
+  color: #ee0a24;
+
+  .van-icon {
+    font-size: 14px;
+  }
+}
+
+// 审核驳回提示
+.reject-notice {
+  background: #fff1f0;
+  border: 1px solid #ffa39e;
+  border-radius: 8px;
+  margin: 12px;
+  padding: 12px 16px;
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  flex-direction: column;
+
+  .reject-title {
+    font-size: 15px;
+    font-weight: 600;
+    color: #ee0a24;
+  }
+
+  .reject-reason {
+    font-size: 13px;
+    color: #333;
+    line-height: 1.6;
+  }
+
+  .reject-tip {
+    font-size: 12px;
+    color: #999;
+  }
+}
+
+// 审核中提示
+.review-notice {
+  background: #fffbe8;
+  border: 1px solid #ffe58f;
+  border-radius: 8px;
+  margin: 12px;
+  padding: 12px 16px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: #ad6800;
 }
 </style>
