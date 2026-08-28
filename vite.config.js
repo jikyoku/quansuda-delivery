@@ -3,6 +3,9 @@ import vue from '@vitejs/plugin-vue'
 import path from 'path'
 
 export default defineConfig({
+  // 配送端部署在独立端口(服务器 8081)，使用根路径；
+  // 本地开发(dev)用根路径，不影响 localhost:3001
+  base: '/',
   plugins: [vue()],
   resolve: {
     alias: {
