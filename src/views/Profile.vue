@@ -29,7 +29,7 @@
       v-model:show="passwordDialogVisible"
       title="修改密码"
       show-cancel-button
-      @confirm="handleChangePassword"
+      :before-close="onPasswordDialogBeforeClose"
     >
       <van-form>
         <van-cell-group inset>
@@ -60,13 +60,17 @@
 <script setup>
 import { ref, reactive, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
+import { storeToRefs } from 'pinia'
 import { showDialog, showToast } from 'vant'
 import { useUserStore } from '@/stores/user'
-import { getProfile } from '@/api/delivery'
+import { getProfile, changePassword, deliveryLogout } from '@/api/delivery'
+import { locationService } from '@/services/locationService'
 
 const router = useRouter()
 const userStore = useUserStore()
-const userInfo = userStore.userInfo
+// 用 storeToRefs 保持响应式：原来直接取 userStore.userInfo 是快照，
+// loadProfile 更新 store 后页面姓名/工号不会刷新
+const { userInfo } = storeToRefs(userStore)
 
 const loadProfile = async () => {
   try {
@@ -105,26 +109,58 @@ const showPasswordDialog = () => {
   passwordDialogVisible.value = true
 }
 
-const handleChangePassword = async () => {
+// 修改密码：对话框关闭前真正调用后端改密接口（BUG-01 / XS-06）。
+// 校验或接口任何一步失败都返回 false 保持弹窗打开，且不显示成功提示；
+// 错误文案由请求层统一提示后端 message。成功后旧会话应失效，强制重新登录。
+const onPasswordDialogBeforeClose = async (action) => {
+  if (action !== 'confirm') return true
+
   if (!passwordForm.oldPassword || !passwordForm.newPassword || !passwordForm.confirmPassword) {
     showToast('请填写完整')
     return false
   }
-  
   if (passwordForm.newPassword !== passwordForm.confirmPassword) {
     showToast('两次密码输入不一致')
     return false
   }
-  
   if (passwordForm.newPassword.length < 6) {
     showToast('密码长度不能少于6位')
     return false
   }
-  
-  // TODO: 调用修改密码接口
-  showToast('密码修改成功')
-  passwordDialogVisible.value = false
+  if (passwordForm.newPassword === passwordForm.oldPassword) {
+    showToast('新密码不能与旧密码相同')
+    return false
+  }
+
+  try {
+    await changePassword({
+      oldPassword: passwordForm.oldPassword,
+      newPassword: passwordForm.newPassword
+    })
+  } catch (error) {
+    console.error('修改密码失败:', error)
+    return false
+  }
+
+  passwordForm.oldPassword = ''
+  passwordForm.newPassword = ''
+  passwordForm.confirmPassword = ''
+  showToast('密码修改成功，请重新登录')
+  await doLogout()
   return true
+}
+
+// 统一登出编排：先停位置服务全部定时器 → 服务端吊销（best-effort）→ 清本地会话 → 跳登录
+// 无论服务端吊销成败，本地必须清干净且位置上报必须停止（BUG-02 / XS-08）
+const doLogout = async () => {
+  locationService.stopAll()
+  try {
+    await deliveryLogout()
+  } catch (error) {
+    console.warn('服务端登出失败，仍继续本地退出:', error)
+  }
+  userStore.clearUser()
+  await router.replace('/login')
 }
 
 const handleLogout = async () => {
@@ -134,12 +170,12 @@ const handleLogout = async () => {
       message: '确定要退出登录吗？',
       showCancelButton: true
     })
-    userStore.clearUser()
-    showToast('已退出登录')
-    router.push('/login')
   } catch (error) {
     // 取消退出
+    return
   }
+  await doLogout()
+  showToast('已退出登录')
 }
 </script>
 
