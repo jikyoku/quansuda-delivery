@@ -331,6 +331,8 @@ const MAX_PHOTOS = 9
 // 待上传文件缓存（处理竞态：用户选图早于订单数据加载完成）
 const pendingUploadFiles = ref([])
 const processingUpload = ref(false)
+let pendingRetryTimer = null
+let pageDisposed = false
 
 // 处理待上传文件的核心函数
 const processUploadFiles = async (fileList) => {
@@ -345,7 +347,12 @@ const processUploadFiles = async (fileList) => {
       file.message = '上传中'
       
       const res = await uploadProofPhoto(order.value.id, rawFile)
-      
+
+      // 后端必须回 attachmentId 才算真上传成功：否则 hasProofPhotos 会误判、
+      // 且该文件删除时无 ID 可删，前后端状态从此不一致
+      if (!res.data?.attachmentId) {
+        throw new Error('上传响应缺少 attachmentId')
+      }
       file.status = 'done'
       file.message = ''
       file.attachmentId = res.data.attachmentId
@@ -386,12 +393,13 @@ const maxBorrowQuantity = computed(() => {
 })
 
 // 使用位置管理 composable
-const { currentLng, currentLat, hasLocation, fetchLocation, startReport, stopReport, getLocation } = useLocation()
+const { currentLng, currentLat, hasLocation, fetchLocation, startReport, stopReport, getLocation, setKnownLocation } = useLocation()
 
 // 地图相关
 const distanceText = ref('计算中...')
 let mapInstance = null
 let routePolyline = null
+let deliveryMarker = null
 
 // 交通工具选项（只保留汽车和步行）
 const transportOptions = [
@@ -537,11 +545,8 @@ const initLocationAndDrawRoute = async () => {
       const lng = Number(res.data.longitude)
       const lat = Number(res.data.latitude)
       console.log('[OrderDetail] 使用后端位置:', lng, lat)
-      // 同步到 composable 和 store
-      hasLocation.value = true
-      currentLng.value = lng
-      currentLat.value = lat
-      userStore.setCurrentLocation(lng, lat)
+      // 同步到位置服务单例（内部会同步 store）
+      setKnownLocation(lng, lat)
       drawRoute(lng, lat, destLng, destLat)
       return
     }
@@ -572,6 +577,14 @@ const initMap = () => {
   }
   const destLng = order.value.destinationLng
   const destLat = order.value.destinationLat
+
+  // 地图实例只创建一次：loadDetail 会在接单/拒单/开始配送后反复调用，
+  // 重复 new AMap.Map 会在同一容器叠加画布与标记且旧实例无人销毁。
+  // 已有实例时只更新中心点并复用。
+  if (mapInstance) {
+    mapInstance.setCenter([destLng, destLat])
+    return
+  }
 
   // 始终以目的地为中心初始化地图
   mapInstance = new AMap.Map('deliveryMap', {
@@ -607,13 +620,18 @@ const drawRoute = (fromLng, fromLat, toLng, toLat) => {
     image: deliveryIconDataUri,
     imageSize: new AMap.Size(32, 40)
   })
-  new AMap.Marker({
-    map: mapInstance,
-    position: [fromLng, fromLat],
-    title: '我的位置',
-    icon: deliveryIcon,
-    offset: new AMap.Pixel(-16, -40)
-  })
+  // 配送员标记复用同一个实例，只更新位置，避免每次重绘路线都叠加一个新标记
+  if (deliveryMarker) {
+    deliveryMarker.setPosition([fromLng, fromLat])
+  } else {
+    deliveryMarker = new AMap.Marker({
+      map: mapInstance,
+      position: [fromLng, fromLat],
+      title: '我的位置',
+      icon: deliveryIcon,
+      offset: new AMap.Pixel(-16, -40)
+    })
+  }
 
   // 根据交通工具选择路线规划方式
   const origin = new AMap.LngLat(fromLng, fromLat)
@@ -822,112 +840,93 @@ const handleComplete = () => {
   completeDialogVisible.value = true
 }
 
-// 弹窗内确认提交
+// 桶入账步骤完成标记：确认送达是「借/还桶入账 + 订单完成」的组合动作，
+// 任一步失败都可能重试，这里记录已成功步骤，重试时不重复记账。
+// 标记绑定订单ID，切换到另一单时自动失效，不会串单。
+const bucketStepsDone = ref({ borrow: false, return: false })
+const bucketStepsForId = ref(null)
+
+// 弹窗内确认提交（XS-10 配送端侧对齐）
+// 旧流程是「先完成订单、再异步补桶账，桶失败视为不影响订单」，会静默产生
+// 订单已完成但桶账缺失的不一致。新流程改为严格串行、失败即阻断：
+//   1. 先借桶入账（数量>0 且未完成过）——失败则中止，不动订单状态；
+//   2. 再还桶入账（同上）；
+//   3. 最后才提交订单完成——失败时明确告知桶账已入账、只需重试确认送达，
+//      重试会跳过已完成的桶步骤，不会重复记账。
+// 订单完成入口全系统只剩详情页这一处（列表页已收敛，见 Orders.vue）。
 const completeDialogConfirm = async () => {
   if (!hasProofPhotos.value) {
     showToast('请先上传配送完成凭证')
     return
   }
+  if (completing.value) return
   completing.value = true
   try {
     const currentOrder = order.value
-    const currentBorrowQty = borrowQuantity.value
-    const currentReturnQty = returnQuantity.value
-    
-    await completeOrder(currentOrder.id, currentBorrowQty, currentReturnQty)
+    if (bucketStepsForId.value !== currentOrder.id) {
+      bucketStepsDone.value = { borrow: false, return: false }
+      bucketStepsForId.value = currentOrder.id
+    }
+    const borrowQty = borrowQuantity.value
+    const returnQty = returnQuantity.value
+    const baseBucketPayload = {
+      address: currentOrder.deliveryAddress,
+      contactName: currentOrder.customerName || '未知',
+      phone: currentOrder.customerPhone || '未知'
+    }
+
+    // 1. 借桶入账
+    if (borrowQty > 0 && !bucketStepsDone.value.borrow) {
+      try {
+        await borrowBucket({
+          ...baseBucketPayload,
+          borrowOrderId: currentOrder.dispatchNo,
+          quantity: borrowQty,
+          remark: '配送员配送时借桶'
+        })
+        bucketStepsDone.value.borrow = true
+      } catch (error) {
+        console.error('[桶管理] 借桶入账失败，已中止确认送达:', error)
+        showToast('借桶记录失败，请重试（订单尚未完成）')
+        return
+      }
+    }
+
+    // 2. 还桶入账
+    if (returnQty > 0 && !bucketStepsDone.value.return) {
+      try {
+        await returnBucket({
+          ...baseBucketPayload,
+          sourceOrderId: currentOrder.dispatchNo,
+          quantity: returnQty,
+          remark: '配送员配送时回收空桶'
+        })
+        bucketStepsDone.value.return = true
+      } catch (error) {
+        console.error('[桶管理] 还桶入账失败，已中止确认送达:', error)
+        showToast('还桶记录失败，请重试（订单尚未完成）')
+        return
+      }
+    }
+
+    // 3. 提交订单完成
+    try {
+      await completeOrder(currentOrder.id, borrowQty, returnQty)
+    } catch (error) {
+      console.error('确认送达失败（桶账已入账）:', error)
+      const bucketDone = bucketStepsDone.value.borrow || bucketStepsDone.value.return
+      showToast(bucketDone ? '桶记录已保存，确认送达失败，请直接重试' : '确认送达失败，请重试')
+      return
+    }
+
+    bucketStepsDone.value = { borrow: false, return: false }
+    bucketStepsForId.value = null
     showToast('已确认送达')
     completeDialogVisible.value = false
-    
-    handleBucketOperations(currentOrder, currentBorrowQty, currentReturnQty).catch(error => {
-      console.warn('[桶管理] 桶记录更新失败（不影响订单状态）:', error)
-      showToast({ type: 'warning', message: '桶记录更新失败，请联系管理员' })
-    })
-    
     stopReport()
     loadDetail()
-  } catch (error) {
-    console.error('确认送达失败:', error)
   } finally {
     completing.value = false
-  }
-}
-
-// 处理桶借还操作
-const handleBucketOperations = async (currentOrder, borrowQty, returnQty) => {
-  console.log('[桶管理] handleBucketOperations 被调用:', {
-    borrowQty,
-    returnQty,
-    currentOrder: currentOrder ? currentOrder.id : null,
-    dispatchNo: currentOrder ? currentOrder.dispatchNo : null
-  })
-  
-  if (borrowQty <= 0 && returnQty <= 0) {
-    console.log('[桶管理] 借还桶数量都为0，跳过操作')
-    return
-  }
-  
-  const address = currentOrder.deliveryAddress
-  const contactName = currentOrder.customerName || '未知'
-  const customerPhone = currentOrder.customerPhone || '未知'
-  const dispatchNo = currentOrder.dispatchNo
-  
-  console.log('[桶管理] 准备上报桶借还信息:', {
-    address,
-    contactName,
-    phone: customerPhone,
-    dispatchNo,
-    borrowQuantity: borrowQty,
-    returnQuantity: returnQty
-  })
-  
-  // 借桶
-  if (borrowQty > 0) {
-    try {
-      console.log('[桶管理] 调用借桶接口:', {
-        address,
-        contactName,
-        phone: customerPhone,
-        borrowOrderId: dispatchNo,
-        quantity: borrowQty
-      })
-      const borrowResult = await borrowBucket({
-        address,
-        contactName,
-        phone: customerPhone,
-        borrowOrderId: dispatchNo,
-        quantity: borrowQty,
-        remark: `配送员配送时借桶`
-      })
-      console.log('[桶管理] 借桶成功:', borrowResult)
-    } catch (error) {
-      console.error('[桶管理] 借桶失败:', error, error.message, error.response)
-      showToast('桶记录更新失败，请联系管理员')
-    }
-  }
-  
-  // 还桶
-  if (returnQty > 0) {
-    try {
-      console.log('[桶管理] 调用还桶接口:', {
-        address,
-        contactName,
-        phone: customerPhone,
-        sourceOrderId: dispatchNo,
-        quantity: returnQty
-      })
-      const returnResult = await returnBucket({
-        address,
-        contactName,
-        phone: customerPhone,
-        sourceOrderId: dispatchNo,
-        quantity: returnQty,
-        remark: `配送员配送时回收空桶`
-      })
-      console.log('[桶管理] 还桶成功:', returnResult)
-    } catch (error) {
-      console.error('[桶管理] 还桶失败:', error, error.message, error.response)
-      showToast('桶记录更新失败，请联系管理员')
-    }
   }
 }
 
@@ -1005,9 +1004,11 @@ const handleAfterRead = async (files) => {
     console.warn('[handleAfterRead] order not ready, caching', fileList.length, 'files')
     pendingUploadFiles.value.push(...fileList)
     // 同时在 loadDetail 完成后会自动触发 watch 处理
-    // 这里设置一个兜底：3秒后如果还没处理，直接重试
-    setTimeout(async () => {
-      if (order.value && pendingUploadFiles.value.length > 0) {
+    // 这里设置一个兜底：3秒后如果还没处理，直接重试（页面卸载后不再执行）
+    if (pendingRetryTimer) clearTimeout(pendingRetryTimer)
+    pendingRetryTimer = setTimeout(async () => {
+      pendingRetryTimer = null
+      if (!pageDisposed && order.value && pendingUploadFiles.value.length > 0) {
         console.log('[handleAfterRead] retry processing cached files')
         const filesToProcess = [...pendingUploadFiles.value]
         pendingUploadFiles.value = []
@@ -1020,13 +1021,22 @@ const handleAfterRead = async (files) => {
   await processUploadFiles(fileList)
 }
 
-// Vant uploader delete 处理
+// Vant uploader delete 处理（凭证删除与后端强一致）：
+// 只有后端删除成功才 resolve（Vant 才会把该项从列表移除）；
+// 失败 reject 保持列表原样并提示，绝不在前端单方面移除（防前后端状态不一致）。
+// 同一凭证删除中再次触发直接 reject，避免重复删除请求。
+const deletingAttachmentIds = new Set()
 const handleDelete = (item) => {
   return new Promise((resolve, reject) => {
     if (!item.attachmentId) {
       resolve()
       return
     }
+    if (deletingAttachmentIds.has(item.attachmentId)) {
+      reject(new Error('正在删除中'))
+      return
+    }
+    deletingAttachmentIds.add(item.attachmentId)
     deleteProofPhoto(item.attachmentId).then(() => {
       if (item.objectUrl) {
         URL.revokeObjectURL(item.objectUrl)
@@ -1036,7 +1046,9 @@ const handleDelete = (item) => {
     }).catch(error => {
       console.error('删除凭证失败:', error)
       showToast('删除失败，请重试')
-      reject()
+      reject(error)
+    }).finally(() => {
+      deletingAttachmentIds.delete(item.attachmentId)
     })
   })
 }
@@ -1079,12 +1091,19 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
+  pageDisposed = true
+  if (pendingRetryTimer) {
+    clearTimeout(pendingRetryTimer)
+    pendingRetryTimer = null
+  }
   stopReport()
   revokeProofObjectUrls()
   if (mapInstance) {
     mapInstance.destroy()
     mapInstance = null
   }
+  routePolyline = null
+  deliveryMarker = null
 })
 </script>
 

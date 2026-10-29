@@ -21,6 +21,7 @@ export function useLocation() {
     // 主动定位
     fetchLocation: () => locationService.fetchLocation(),
     getLocation: () => locationService.getLocation(),
+    setKnownLocation: (lng, lat) => locationService.setKnownLocation(lng, lat),
 
     // 详情页单单即时上报（无 per-order 定时器，持续上报由全局批量接管）
     startReport: (dispatchId) => locationService.trackOrder(dispatchId),
