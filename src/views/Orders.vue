@@ -5,7 +5,10 @@
       <van-tab title="待接单" name="pending" />
       <van-tab title="已接单" name="accepted" />
       <van-tab title="配送中" name="delivering" />
-      <van-tab title="已完成" name="completed" />
+      <!-- 后端对 status=3 的定义是聚合查询 {3 已完成, 9 待平台审核, 10 审核驳回}，
+           页签命名与之对齐为「已送达」，每条记录的真实状态以后端 statusName 展示（XS-12；
+           待后端 shared/enums.json 生成后复核字典口径） -->
+      <van-tab title="已送达" name="completed" />
     </van-tabs>
     
     <!-- 时间筛选器 -->
@@ -120,7 +123,8 @@
 import { ref, computed, onMounted, watch } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { showDialog, showToast } from 'vant'
-import { getOrderList, acceptOrder, rejectOrder, startDelivery, completeOrder } from '@/api/delivery'
+import { getOrderList, acceptOrder, rejectOrder, startDelivery } from '@/api/delivery'
+import { locationService } from '@/services/locationService'
 
 const router = useRouter()
 const route = useRoute()
@@ -195,8 +199,10 @@ const statusMap = {
   completed: 3
 }
 
-// 加载订单列表
+// 加载订单列表（带序号：快速切页签/改筛选时旧响应回来直接丢弃，避免数据串页）
+let loadSeq = 0
 const onLoad = async () => {
+  const seq = ++loadSeq
   try {
     const status = statusMap[activeTab.value]
     const params = { ...getDateParams() }
@@ -204,12 +210,15 @@ const onLoad = async () => {
       params.status = status
     }
     const res = await getOrderList(params)
-    orderList.value = res.data
+    if (seq !== loadSeq) return
+    orderList.value = res.data || []
     finished.value = true
   } catch (error) {
     console.error('加载订单失败:', error)
   } finally {
-    loading.value = false
+    if (seq === loadSeq) {
+      loading.value = false
+    }
   }
 }
 
@@ -287,6 +296,7 @@ const handleAccept = async (order) => {
     await acceptOrder(order.id)
     showToast('接单成功')
     onTabChange()
+    locationService.refreshActiveDispatches()
   } catch (error) {
     if (error !== 'cancel') {
       console.error('接单失败:', error)
@@ -323,6 +333,7 @@ const handleStartDelivery = async (order) => {
     await startDelivery(order.id)
     showToast('已开始配送')
     onTabChange()
+    locationService.refreshActiveDispatches()
   } catch (error) {
     if (error !== 'cancel') {
       console.error('开始配送失败:', error)
@@ -330,22 +341,12 @@ const handleStartDelivery = async (order) => {
   }
 }
 
-// 确认送达
-const handleComplete = async (order) => {
-  try {
-    await showDialog({
-      title: '确认送达',
-      message: `确认订单 ${order.dispatchNo} 已送达？`,
-      showCancelButton: true
-    })
-    await completeOrder(order.id)
-    showToast('已确认送达')
-    onTabChange()
-  } catch (error) {
-    if (error !== 'cancel') {
-      console.error('确认送达失败:', error)
-    }
-  }
+// 确认送达：列表页不再提供绕过路径（XS-10）。
+// 送达必须在详情页走完整流程（上传凭证 + 借/还桶入账），
+// 这里只负责把配送员带到详情页，避免出现"列表一键完成、无凭证无桶账"的不一致状态。
+const handleComplete = (order) => {
+  showToast('请在详情页上传凭证并确认送达')
+  goToDetail(order.id)
 }
 
 // 跳转详情
