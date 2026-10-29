@@ -48,9 +48,14 @@ export function getProfile() {
   return request.get('/delivery/profile')
 }
 
-// 修改密码
+// 修改密码（入参 { oldPassword, newPassword }；后端按此路径补齐，见 XS-06）
 export function changePassword(data) {
   return request.put('/delivery/profile/password', data)
+}
+
+// 配送员登出（服务端吊销 token；调用方应 best-effort 调用，无论成败都清本地会话，见 XS-08）
+export function deliveryLogout() {
+  return request.post('/delivery/logout')
 }
 
 // 更新在线状态
@@ -58,20 +63,8 @@ export function updateOnlineStatus(onlineStatus) {
   return request.put('/delivery/online-status', null, { params: { onlineStatus } })
 }
 
-// 上报配送员位置
-export function reportLocation(data) {
-  return request.post('/delivery/location/report', data)
-}
-
-// 配送员批量上报位置（全局上报模式）
-export function reportLocationBatch(data) {
-  return request.post('/delivery/location/report-batch', data)
-}
-
-// 获取配送员当前在途派单ID列表
-export function getActiveDispatchIds() {
-  return request.get('/delivery/location/active-dispatch-ids')
-}
+// 位置相关接口已收敛到 @/api/location，这里保留 re-export 兼容旧引用
+export { reportLocation, reportLocationBatch, getActiveDispatchIds } from './location'
 
 // 获取配送轨迹
 export function getDeliveryTrack(dispatchId) {
