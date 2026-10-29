@@ -158,8 +158,8 @@ const loadData = async () => {
       getTodayStats(),
       getOrderList({ status: null }) // 加载全部状态，前端过滤
     ])
-    stats.value = statsRes.data
-    orders.value = ordersRes.data
+    stats.value = statsRes.data || {}
+    orders.value = ordersRes.data || []
   } catch (error) {
     console.error('加载数据失败:', error)
   }

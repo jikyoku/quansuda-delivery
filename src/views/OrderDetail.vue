@@ -393,7 +393,7 @@ const maxBorrowQuantity = computed(() => {
 })
 
 // 使用位置管理 composable
-const { currentLng, currentLat, hasLocation, fetchLocation, startReport, stopReport, getLocation, setKnownLocation } = useLocation()
+const { currentLng, currentLat, hasLocation, fetchLocation, startReport, stopReport, getLocation, setKnownLocation, refreshActiveDispatches } = useLocation()
 
 // 地图相关
 const distanceText = ref('计算中...')
@@ -924,6 +924,9 @@ const completeDialogConfirm = async () => {
     showToast('已确认送达')
     completeDialogVisible.value = false
     stopReport()
+    // 该单已离开在途集合：立即刷新，位置服务会随之自动停止/调整上报，
+    // 不必等 60 秒监视轮询才发现
+    refreshActiveDispatches()
     loadDetail()
   } finally {
     completing.value = false
