@@ -25,10 +25,9 @@ export function useLocation() {
 
     // 详情页单单即时上报（无 per-order 定时器，持续上报由全局批量接管）
     startReport: (dispatchId) => locationService.trackOrder(dispatchId),
-    stopReport: () => locationService.untrackOrder(),
+    stopReport: () => locationService.untrackOrder()
 
-    // 全局上报生命周期（幂等，由服务按 登录 && 在线 && 在途单 驱动）
-    startGlobalReport: () => locationService.bootstrap(),
-    stopGlobalReport: () => locationService.setOnline(false)
+    // 全局上报生命周期不再经本 composable 暴露：页面直接用 locationService
+    // 的 bootstrap()/setOnline()/stopAll()，避免再出现多套启停入口
   }
 }
