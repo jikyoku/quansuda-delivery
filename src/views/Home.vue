@@ -132,11 +132,7 @@ import { useRouter } from 'vue-router'
 import { showDialog, showToast } from 'vant'
 import { getTodayStats, getOrderList, acceptOrder, rejectOrder, startDelivery, updateOnlineStatus } from '@/api/delivery'
 import { useUserStore } from '@/stores/user'
-import { useLocation } from '@/composables/useLocation'
-
-const router = useRouter()
-const userStore = useUserStore()
-const { fetchLocation, startGlobalReport, stopGlobalReport } = useLocation()
+import { locationService } from '@/services/locationService'
 const isOnline = ref(userStore.userInfo.onlineStatus === 1)
 const stats = ref({})
 const orders = ref([])
@@ -176,12 +172,8 @@ const onStatusChange = async (value) => {
     const info = { ...userStore.userInfo, onlineStatus: value ? 1 : 0 }
     userStore.setUserInfo(info)
     showToast(value ? '已上线，开始接单' : '已离线')
-    // 上线时启动全局位置上报，离线时停止
-    if (value) {
-      startGlobalReport()
-    } else {
-      stopGlobalReport()
-    }
+    // 位置服务的启停由单例按 在线 状态统一驱动，页面只同步开关（BUG-02/04）
+    locationService.setOnline(value)
   } catch (error) {
     console.error('切换在线状态失败:', error)
     isOnline.value = !value // 回滚状态
@@ -198,6 +190,8 @@ const handleAccept = async (order) => {
     await acceptOrder(order.id)
     showToast('接单成功')
     loadData()
+    // 新单进入在途范围，通知位置服务刷新集合（有在途单时自动开始上报）
+    locationService.refreshActiveDispatches()
   } catch (error) {
     if (error !== 'cancel') {
       console.error('接单失败:', error)
@@ -234,6 +228,7 @@ const handleStartDelivery = async (order) => {
     await startDelivery(order.id)
     showToast('已开始配送')
     loadData()
+    locationService.refreshActiveDispatches()
   } catch (error) {
     if (error !== 'cancel') {
       console.error('开始配送失败:', error)
@@ -249,11 +244,10 @@ const goToDetail = (id) => {
 onMounted(async () => {
   await loadData()
   // 获取配送员当前位置
-  await fetchLocation()
-  // 如果已在线，启动全局位置上报
-  if (isOnline.value) {
-    startGlobalReport()
-  }
+  await locationService.fetchLocation()
+  // 位置服务是全局单例：bootstrap 幂等，反复进出首页不会叠加任何定时器，
+  // 页面卸载也不需要清理（登出时统一 stopAll）
+  locationService.bootstrap()
 })
 </script>
 

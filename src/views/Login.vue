@@ -50,6 +50,7 @@ import { useRouter } from 'vue-router'
 import { showToast } from 'vant'
 import { deliveryLogin } from '@/api/delivery'
 import { useUserStore } from '@/stores/user'
+import { locationService } from '@/services/locationService'
 
 const router = useRouter()
 const userStore = useUserStore()
@@ -64,8 +65,13 @@ const onSubmit = async () => {
   loading.value = true
   try {
     const res = await deliveryLogin(form)
-    userStore.setToken(res.data.token)
-    userStore.setUserInfo(res.data)
+    // token 类字段单独存放，不混进 userInfo 持久化（XS-08）
+    const { token, refreshToken, ...profile } = res.data || {}
+    userStore.setToken(token)
+    userStore.setRefreshToken(refreshToken || '')
+    userStore.setUserInfo(profile)
+    // 启动位置服务（监视/上报按 在线 && 在途单 自动运行）
+    locationService.bootstrap()
     showToast('登录成功')
     router.push('/home')
   } catch (error) {
