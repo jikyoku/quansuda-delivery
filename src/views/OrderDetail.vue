@@ -309,7 +309,6 @@ import { ref, computed, onMounted, onUnmounted, nextTick, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { showDialog, showToast, showImagePreview } from 'vant'
 import { getOrderDetail, acceptOrder, rejectOrder, startDelivery, completeOrder, getCurrentLocation, uploadProofPhoto, getProofPhotos, deleteProofPhoto, fetchProofPhoto } from '@/api/delivery'
-import { borrowBucket, returnBucket } from '@/api/bucket'
 import { useLocation } from '@/composables/useLocation'
 import { useUserStore } from '@/stores/user'
 
@@ -840,19 +839,13 @@ const handleComplete = () => {
   completeDialogVisible.value = true
 }
 
-// 桶入账步骤完成标记：确认送达是「借/还桶入账 + 订单完成」的组合动作，
-// 任一步失败都可能重试，这里记录已成功步骤，重试时不重复记账。
-// 标记绑定订单ID，切换到另一单时自动失效，不会串单。
-const bucketStepsDone = ref({ borrow: false, return: false })
-const bucketStepsForId = ref(null)
-
-// 弹窗内确认提交（XS-10 配送端侧对齐）
-// 旧流程是「先完成订单、再异步补桶账，桶失败视为不影响订单」，会静默产生
-// 订单已完成但桶账缺失的不一致。新流程改为严格串行、失败即阻断：
-//   1. 先借桶入账（数量>0 且未完成过）——失败则中止，不动订单状态；
-//   2. 再还桶入账（同上）；
-//   3. 最后才提交订单完成——失败时明确告知桶账已入账、只需重试确认送达，
-//      重试会跳过已完成的桶步骤，不会重复记账。
+// 弹窗内确认提交（XS-10 定版口径）
+// 桶账由后端在 completeOrder 的同一事务内统一记账：配送端只把借/还桶数量
+// 随完成请求提交（borrowBucketCount / returnBucketCount），不再前置调用
+// /api/bucket/borrow、/api/bucket/return 独立记账——旧的前置记账会与后端
+// 事务内记账撞防重校验，导致带桶订单永远无法确认送达。
+// 因此这里只有一次请求：失败即整单未完成（后端事务回滚，桶账也不会落），
+// 直接重试即可，不存在「部分步骤已成功需跳过」的中间状态。
 // 订单完成入口全系统只剩详情页这一处（列表页已收敛，见 Orders.vue）。
 const completeDialogConfirm = async () => {
   if (!hasProofPhotos.value) {
@@ -863,64 +856,14 @@ const completeDialogConfirm = async () => {
   completing.value = true
   try {
     const currentOrder = order.value
-    if (bucketStepsForId.value !== currentOrder.id) {
-      bucketStepsDone.value = { borrow: false, return: false }
-      bucketStepsForId.value = currentOrder.id
-    }
-    const borrowQty = borrowQuantity.value
-    const returnQty = returnQuantity.value
-    const baseBucketPayload = {
-      address: currentOrder.deliveryAddress,
-      contactName: currentOrder.customerName || '未知',
-      phone: currentOrder.customerPhone || '未知'
-    }
-
-    // 1. 借桶入账
-    if (borrowQty > 0 && !bucketStepsDone.value.borrow) {
-      try {
-        await borrowBucket({
-          ...baseBucketPayload,
-          borrowOrderId: currentOrder.dispatchNo,
-          quantity: borrowQty,
-          remark: '配送员配送时借桶'
-        })
-        bucketStepsDone.value.borrow = true
-      } catch (error) {
-        console.error('[桶管理] 借桶入账失败，已中止确认送达:', error)
-        showToast('借桶记录失败，请重试（订单尚未完成）')
-        return
-      }
-    }
-
-    // 2. 还桶入账
-    if (returnQty > 0 && !bucketStepsDone.value.return) {
-      try {
-        await returnBucket({
-          ...baseBucketPayload,
-          sourceOrderId: currentOrder.dispatchNo,
-          quantity: returnQty,
-          remark: '配送员配送时回收空桶'
-        })
-        bucketStepsDone.value.return = true
-      } catch (error) {
-        console.error('[桶管理] 还桶入账失败，已中止确认送达:', error)
-        showToast('还桶记录失败，请重试（订单尚未完成）')
-        return
-      }
-    }
-
-    // 3. 提交订单完成
     try {
-      await completeOrder(currentOrder.id, borrowQty, returnQty)
+      await completeOrder(currentOrder.id, borrowQuantity.value, returnQuantity.value)
     } catch (error) {
-      console.error('确认送达失败（桶账已入账）:', error)
-      const bucketDone = bucketStepsDone.value.borrow || bucketStepsDone.value.return
-      showToast(bucketDone ? '桶记录已保存，确认送达失败，请直接重试' : '确认送达失败，请重试')
+      console.error('确认送达失败:', error)
+      showToast('确认送达失败，请重试')
       return
     }
 
-    bucketStepsDone.value = { borrow: false, return: false }
-    bucketStepsForId.value = null
     showToast('已确认送达')
     completeDialogVisible.value = false
     stopReport()
