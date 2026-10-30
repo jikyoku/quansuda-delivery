@@ -43,7 +43,7 @@
             v-model="passwordForm.newPassword"
             type="password"
             label="新密码"
-            placeholder="请输入新密码"
+            placeholder="至少10位，含大小写字母和数字"
           />
           <van-field
             v-model="passwordForm.confirmPassword"
@@ -52,6 +52,9 @@
             placeholder="请再次输入新密码"
           />
         </van-cell-group>
+        <div style="padding: 8px 16px 4px; font-size: 12px; color: #969799; line-height: 1.6;">
+          密码规则：长度至少 10 位，且须同时包含大写字母、小写字母和数字。
+        </div>
       </van-form>
     </van-dialog>
   </div>
@@ -123,8 +126,16 @@ const onPasswordDialogBeforeClose = async (action) => {
     showToast('两次密码输入不一致')
     return false
   }
-  if (passwordForm.newPassword.length < 6) {
-    showToast('密码长度不能少于6位')
+  // 与后端 PasswordPolicy 对齐（V-5）：≥10 位且含大写、小写、数字，
+  // 避免弱口令提交后才被后端拒绝
+  if (passwordForm.newPassword.length < 10) {
+    showToast('新密码长度至少为10位')
+    return false
+  }
+  if (!/[A-Z]/.test(passwordForm.newPassword)
+    || !/[a-z]/.test(passwordForm.newPassword)
+    || !/\d/.test(passwordForm.newPassword)) {
+    showToast('新密码须同时包含大写字母、小写字母和数字')
     return false
   }
   if (passwordForm.newPassword === passwordForm.oldPassword) {
