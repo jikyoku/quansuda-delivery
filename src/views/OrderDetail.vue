@@ -374,15 +374,29 @@ const processUploadFiles = async (fileList) => {
   }
 }
 
-// 当 order 变为可用时，自动处理缓存的待上传文件
-watch(order, async (newVal) => {
-  if (newVal && pendingUploadFiles.value.length > 0 && !processingUpload.value) {
-    processingUpload.value = true
-    const files = [...pendingUploadFiles.value]
-    pendingUploadFiles.value = []
-    console.log('[watch order] processing', files.length, 'pending files')
+// 待上传文件的统一消费入口（V-6 竞态修复）：watch 触发与 3 秒兜底重试
+// 都必须走这里，由 processingUpload 守卫串行化——任一路径进入时先置位、
+// 先把缓存整体摘走再处理，另一路径看到守卫或空缓存即退出，
+// 同一文件不会被两条路径各上传一次。
+const drainPendingUploads = async () => {
+  if (pageDisposed || !order.value || processingUpload.value || pendingUploadFiles.value.length === 0) {
+    return
+  }
+  processingUpload.value = true
+  const files = [...pendingUploadFiles.value]
+  pendingUploadFiles.value = []
+  console.log('[drainPendingUploads] processing', files.length, 'pending files')
+  try {
     await processUploadFiles(files)
+  } finally {
     processingUpload.value = false
+  }
+}
+
+// 当 order 变为可用时，自动处理缓存的待上传文件
+watch(order, (newVal) => {
+  if (newVal) {
+    drainPendingUploads()
   }
 })
 
@@ -399,6 +413,11 @@ const distanceText = ref('计算中...')
 let mapInstance = null
 let routePolyline = null
 let deliveryMarker = null
+// 路线规划插件实例复用（V-6）：Driving/Walking 每次 new 都会注册内部回调与
+// 结果渲染器，不销毁会随重绘次数累积；改为每种模式各持一个单例，重绘前
+// clear 上次结果，组件卸载时清理并置空。
+let drivingService = null
+let walkingService = null
 
 // 交通工具选项（只保留汽车和步行）
 const transportOptions = [
@@ -636,13 +655,22 @@ const drawRoute = (fromLng, fromLat, toLng, toLat) => {
   const origin = new AMap.LngLat(fromLng, fromLat)
   const destination = new AMap.LngLat(toLng, toLat)
 
+  // 插件实例复用：首次按模式懒创建，之后重绘只 clear 上次结果再 search，
+  // 不再每次新建实例（V-6）
   let routePlugin = null
   if (transportMode.value === 'driving') {
-    routePlugin = new AMap.Driving({ map: null })
+    if (!drivingService) {
+      drivingService = new AMap.Driving({ map: null })
+    }
+    routePlugin = drivingService
   } else {
     // walking
-    routePlugin = new AMap.Walking({ map: null })
+    if (!walkingService) {
+      walkingService = new AMap.Walking({ map: null })
+    }
+    routePlugin = walkingService
   }
+  routePlugin.clear?.()
 
   routePlugin.search(origin, destination, (status, result) => {
     console.log('[OrderDetail] 路线规划结果:', status, result)
@@ -950,16 +978,13 @@ const handleAfterRead = async (files) => {
     console.warn('[handleAfterRead] order not ready, caching', fileList.length, 'files')
     pendingUploadFiles.value.push(...fileList)
     // 同时在 loadDetail 完成后会自动触发 watch 处理
-    // 这里设置一个兜底：3秒后如果还没处理，直接重试（页面卸载后不再执行）
+    // 这里设置一个兜底：3秒后如果还没处理再重试一次；重试同样走
+    // drainPendingUploads 的 processingUpload 守卫，不与 watch 路径重复处理（V-6）
     if (pendingRetryTimer) clearTimeout(pendingRetryTimer)
-    pendingRetryTimer = setTimeout(async () => {
+    pendingRetryTimer = setTimeout(() => {
       pendingRetryTimer = null
-      if (!pageDisposed && order.value && pendingUploadFiles.value.length > 0) {
-        console.log('[handleAfterRead] retry processing cached files')
-        const filesToProcess = [...pendingUploadFiles.value]
-        pendingUploadFiles.value = []
-        await processUploadFiles(filesToProcess)
-      }
+      console.log('[handleAfterRead] retry processing cached files')
+      drainPendingUploads()
     }, 3000)
     return
   }
@@ -1044,6 +1069,15 @@ onUnmounted(() => {
   }
   stopReport()
   revokeProofObjectUrls()
+  // 路线规划插件实例清理（V-6）：clear 掉渲染结果后置空，下次进入页面重新懒创建
+  if (drivingService) {
+    drivingService.clear?.()
+    drivingService = null
+  }
+  if (walkingService) {
+    walkingService.clear?.()
+    walkingService = null
+  }
   if (mapInstance) {
     mapInstance.destroy()
     mapInstance = null
