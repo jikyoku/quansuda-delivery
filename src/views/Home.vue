@@ -133,6 +133,9 @@ import { showDialog, showToast } from 'vant'
 import { getTodayStats, getOrderList, acceptOrder, rejectOrder, startDelivery, updateOnlineStatus } from '@/api/delivery'
 import { useUserStore } from '@/stores/user'
 import { locationService } from '@/services/locationService'
+
+const router = useRouter()
+const userStore = useUserStore()
 const isOnline = ref(userStore.userInfo.onlineStatus === 1)
 const stats = ref({})
 const orders = ref([])
