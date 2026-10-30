@@ -60,7 +60,8 @@ const stats = ref({})
 const loadStats = async () => {
   try {
     const res = await getTodayStats()
-    stats.value = res.data
+    // 空值兜底与 Home 页一致（V-3）：data 为 null 时模板 stats.xxx 会抛错
+    stats.value = res.data || {}
   } catch (error) {
     console.error('加载统计数据失败:', error)
   }
